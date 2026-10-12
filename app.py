@@ -45,9 +45,15 @@ st.markdown("""
     gap: 3px !important;
     margin-bottom: 2px !important;
 }
-.block-container {
-    padding-top: 1.5rem !important;
-    padding-bottom: 1.5rem !important;
+/* Eliminar el parpadeo blanco/atenuado de Streamlit durante la recarga en segundo plano */
+[data-testid="stAppViewContainer"],
+[data-testid="stMainBlockContainer"],
+.element-container,
+.stCustomComponentV1,
+.stCustomComponentV1 iframe {
+    opacity: 1 !important;
+    filter: none !important;
+    transition: none !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -101,17 +107,22 @@ usuario_actual = st.session_state["usuario"]
 
 st_autorefresh(interval=5000, key="auto_refresco")
 
-col_logo, col_titulo, col_sesion = st.columns([0.8, 7, 2.2])
+col_logo, col_titulo, col_sesion = st.columns([0.8, 6.2, 3])
 with col_logo:
     st.image(_ruta_logo, width=60)
 with col_titulo:
     st.markdown("<h2 style='margin:0; padding-top:6px;'>Agenda de la clínica</h2>", unsafe_allow_html=True)
 with col_sesion:
-    st.markdown(
-        f"<div style='text-align:right; color:#666; font-size:12px; margin-bottom:4px;'>"
-        f"👤 <b>{usuario_actual['nombre_completo']}</b></div>",
-        unsafe_allow_html=True,
-    )
+    c_user, c_ref = st.columns([2, 1])
+    with c_user:
+        st.markdown(
+            f"<div style='text-align:right; color:#666; font-size:12px; padding-top:4px;'>"
+            f"👤 <b>{usuario_actual['nombre_completo']}</b></div>",
+            unsafe_allow_html=True,
+        )
+    with c_ref:
+        if st.button("🔄", help="Actualizar agenda ahora", use_container_width=True, key="btn_refresco"):
+            st.rerun()
     if st.button("Cerrar sesión", use_container_width=True, key="btn_logout"):
         st.session_state["usuario"] = None
         st.rerun()

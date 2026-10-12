@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; font-family: -apple-system, "Segoe UI", sans-serif; }
+  #menu-estado {
+    position: fixed; display: none; background: #fff; border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(20,20,30,0.18); border: 1px solid #eee;
+    padding: 6px; z-index: 9999; min-width: 210px;
+  }
+  #menu-estado .titulo {
+    font-size: 10.5px; color: #9ca3af; padding: 6px 10px 4px;
+    font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em;
+  }
+  #menu-estado button {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    padding: 8px 10px; border-radius: 8px; font-size: 13px; cursor: pointer; color: #26272b;
+  }
+  #menu-estado button:hover { background: #f2f3f5; }
+  #menu-estado button.actual { font-weight: 700; background: #f7f7f9; }
+  #menu-estado button.peligro { color: #dc2626; }
+  #menu-estado button.peligro:hover { background: #fef2f2; }
+  #menu-estado .separador { height: 1px; background: #eee; margin: 6px 4px; }
+
+  #fondo-detalle {
+    display: none; position: fixed; inset: 0; background: rgba(20,20,30,0.35); z-index: 9998;
+  }
+  #panel-detalle {
+    display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    background: #fbfbfc; border-radius: 16px; box-shadow: 0 12px 40px rgba(20,20,30,0.25);
+    width: 480px; max-width: 92vw; max-height: 82vh; overflow-y: auto; z-index: 9999;
+    padding: 20px 20px 24px;
+  }
+  #panel-detalle .cerrar {
+    position: absolute; top: 14px; right: 16px; cursor: pointer; font-size: 18px;
+    color: #9ca3af; background: none; border: none;
+  }
+  #panel-detalle .cerrar:hover { color: #26272b; }
+  #panel-detalle h2 {
+    font-size: 17px; margin: 0 0 2px; color: #1a1a1a; text-transform: uppercase;
+  }
+  #panel-detalle .subt { font-size: 12px; color: #9ca3af; margin-bottom: 14px; }
+  .tarjeta-info {
+    background: #fff; border: 1px solid #eef0f3; border-radius: 12px;
+    padding: 12px 14px; margin-bottom: 10px;
+  }
+  .tarjeta-info .titulo-card {
+    font-size: 10.5px; color: #9ca3af; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.02em; margin-bottom: 8px;
+  }
+  .fila-dato { display: flex; justify-content: space-between; font-size: 13px; padding: 3px 0; }
+  .fila-dato .etiqueta { color: #8b8e98; }
+  .fila-dato .valor { color: #26272b; font-weight: 600; text-align: right; }
+  .item-historial {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 7px 0; border-bottom: 1px solid #f2f2f4; font-size: 12.5px;
+  }
+  .item-historial:last-child { border-bottom: none; }
+  .item-historial .fecha-hist { color: #26272b; font-weight: 600; }
+  .item-historial .detalle-hist { color: #9ca3af; font-size: 11.5px; }
+  .sin-historial { color: #b0b3bb; font-size: 12.5px; font-style: italic; }
+</style>
+</head>
+<body>
+<div id="contenedor"></div>
+<div id="menu-estado"></div>
+<div id="fondo-detalle"></div>
+<div id="panel-detalle"></div>
+<script>
+// ---------------------------------------------------------
+// Protocolo mínimo de comunicación con Streamlit (sin librerías)
+// ---------------------------------------------------------
+function enviarAltura() {
+    const h = document.documentElement.scrollHeight;
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: h }, "*");
+}
+function enviarValor(valor) {
+    window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setComponentValue", value: valor }, "*");
+}
+window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
+
+let ESTADOS = [];
+let ICONOS = {};
+
+window.addEventListener("message", (event) => {
+    if (!event.data || event.data.type !== "streamlit:render") return;
+    const args = event.data.args || {};
+    document.getElementById("contenedor").innerHTML = args.html || "";
+    ESTADOS = args.estados || [];
+    ICONOS = args.iconos || {};
+    configurarLineaAhora(args);
+    configurarClicksEnTurnos();
+    enviarAltura();
+});
+
+// ---------------------------------------------------------
+// Línea de "ahora" en vivo (recalculada acá, no vía <script>
+// inyectado, que el navegador no ejecuta al insertarlo con innerHTML)
+// ---------------------------------------------------------
+function configurarLineaAhora(args) {
+    if (!args.es_hoy) return;
+    function actualizar() {
+        const ahora = new Date();
+        const inicio = new Date(ahora);
+        inicio.setHours(args.hora_inicio_h, args.hora_inicio_m, 0, 0);
+        const minutos = (ahora - inicio) / 60000;
+        const franja = minutos / 5;
+        const linea = document.getElementById("ahora-linea");
+        const etiqueta = document.getElementById("ahora-etiqueta");
+        if (!linea) return;
+        if (minutos < 0 || franja > args.total_franjas) { linea.style.display = "none"; return; }
+        linea.style.display = "block";
+        linea.style.top = (args.alto_encabezado + franja * args.alto_fila) + "px";
+        if (etiqueta) {
+            const hh = String(ahora.getHours()).padStart(2, "0");
+            const mm = String(ahora.getMinutes()).padStart(2, "0");
+            etiqueta.textContent = hh + ":" + mm;
+        }
+    }
+    actualizar();
+    setInterval(actualizar, 1000);
+}
+
+// ---------------------------------------------------------
+// Click en un turno → menú de estados
+// ---------------------------------------------------------
+function configurarClicksEnTurnos() {
+    // 1. Click en la barra de color -> Cambiar estado
+    document.querySelectorAll(".barra-estado").forEach((barra) => {
+        barra.style.cursor = "pointer";
+        barra.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const tarjeta = barra.closest(".tarjeta-turno");
+            abrirMenuEstado(tarjeta, e.clientX, e.clientY);
+        });
+    });
+
+    // 2. Click en la tarjeta o contenido -> Abrir panel de detalle
+    document.querySelectorAll(".tarjeta-turno").forEach((tarjeta) => {
+        tarjeta.style.cursor = "pointer";
+        tarjeta.addEventListener("click", (e) => {
+            if (e.target.closest(".barra-estado")) return;
+            e.stopPropagation();
+            const contenido = tarjeta.querySelector(".contenido-turno");
+            if (contenido) {
+                abrirPanelDetalle(contenido);
+            }
+        });
+    });
+
+    // 3. Click en casillero libre -> Cargar nuevo turno
+    document.querySelectorAll(".libre").forEach((celda) => {
+        celda.style.cursor = "pointer";
+        celda.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const hora = celda.getAttribute("data-hora");
+            const consId = parseInt(celda.getAttribute("data-cons-id"));
+            const consNombre = celda.getAttribute("data-cons-nombre");
+            if (hora && consId) {
+                enviarValor({
+                    tipo: "nuevo_turno",
+                    hora: hora,
+                    consultorio_id: consId,
+                    consultorio_nombre: consNombre,
+                    ts: Date.now()
+                });
+            }
+        });
+    });
+}
+
+function abrirMenuEstado(tarjetaEl, x, y) {
+    const ids = (tarjetaEl.dataset.ids || "").split(",").filter(Boolean).map(Number);
+    const estadoActual = tarjetaEl.dataset.estado;
+    const menu = document.getElementById("menu-estado");
+
+    let htmlMenu = '<div class="titulo">Cambiar estado</div>';
+    ESTADOS.forEach((est) => {
+        const esActual = est === estadoActual;
+        const icono = ICONOS[est] || "";
+        htmlMenu += `<button data-estado="${est}" class="${esActual ? 'actual' : ''}">${icono} ${est}</button>`;
+    });
+    htmlMenu += '<div class="separador"></div>';
+    htmlMenu += `<button data-estado="__eliminar__" class="peligro">🗑️ Eliminar turno</button>`;
+    menu.innerHTML = htmlMenu;
+
+    const anchoMenu = 220;
+    const altoMenu = 40 + (ESTADOS.length + 1) * 36 + 10;
+    menu.style.left = Math.min(x, window.innerWidth - anchoMenu - 10) + "px";
+    menu.style.top = Math.min(y, window.innerHeight - altoMenu - 10) + "px";
+    menu.style.display = "block";
+
+    menu.querySelectorAll("button").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            enviarValor({ ids: ids, estado: btn.dataset.estado, ts: Date.now() });
+            menu.style.display = "none";
+        });
+    });
+    enviarAltura();
+}
+
+document.addEventListener("click", () => {
+    document.getElementById("menu-estado").style.display = "none";
+});
+
+// ---------------------------------------------------------
+// Panel de detalle del turno (nombre/tarjeta → info completa)
+// ---------------------------------------------------------
+function abrirPanelDetalle(contenidoEl) {
+    const b64 = contenidoEl.dataset.detalle;
+    if (!b64) return;
+    let d;
+    try {
+        const binString = atob(b64);
+        const bytes = Uint8Array.from(binString, (m) => m.charCodeAt(0));
+        d = JSON.parse(new TextDecoder().decode(bytes));
+    } catch (err) {
+        try {
+            d = JSON.parse(decodeURIComponent(escape(atob(b64))));
+        } catch (e2) {
+            console.error("Error al decodificar detalle:", e2);
+            return;
+        }
+    }
+
+    let historialHtml = '<div class="sin-historial">Sin citas anteriores registradas</div>';
+    if (d.historial && d.historial.length > 0) {
+        historialHtml = d.historial.map((c) => `
+            <div class="item-historial">
+                <div>
+                    <div class="fecha-hist">${c.fecha} · ${c.hora}</div>
+                    <div class="detalle-hist">${c.profesional} — ${c.servicio}</div>
+                </div>
+                <div class="detalle-hist">${ICONOS[c.estado] || ""} ${c.estado}</div>
+            </div>
+        `).join("");
+    }
+
+    const panel = document.getElementById("panel-detalle");
+    panel.innerHTML = `
+        <button class="cerrar" id="btn-cerrar-detalle">✕</button>
+        <h2>${d.nombre}</h2>
+        <div class="subt">DNI ${d.dni} · ${d.hora} hs · ${d.consultorio}</div>
+
+        <div class="tarjeta-info">
+            <div class="titulo-card">Contacto</div>
+            <div class="fila-dato"><span class="etiqueta">Teléfono</span><span class="valor">${d.telefono}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Obra social</span><span class="valor">${d.obra_social}</span></div>
+        </div>
+
+        <div class="tarjeta-info">
+            <div class="titulo-card">Este turno</div>
+            <div class="fila-dato"><span class="etiqueta">Profesional</span><span class="valor">${d.profesional}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Servicio</span><span class="valor">${d.servicio}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Estado</span><span class="valor">${ICONOS[d.estado] || ""} ${d.estado}</span></div>
+        </div>
+
+        <div class="tarjeta-info">
+            <div class="titulo-card">Auditoría</div>
+            <div class="fila-dato"><span class="etiqueta">Creado por</span><span class="valor">${d.creado_por}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Fecha de carga</span><span class="valor">${d.creado_en}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Última modificación</span><span class="valor">${d.modificado_por}</span></div>
+            <div class="fila-dato"><span class="etiqueta">Fecha de modificación</span><span class="valor">${d.modificado_en}</span></div>
+        </div>
+
+        <div class="tarjeta-info">
+            <div class="titulo-card">Citas anteriores</div>
+            ${historialHtml}
+        </div>
+    `;
+
+    document.getElementById("fondo-detalle").style.display = "block";
+    panel.style.display = "block";
+
+    document.getElementById("btn-cerrar-detalle").addEventListener("click", cerrarPanelDetalle);
+    document.getElementById("fondo-detalle").addEventListener("click", cerrarPanelDetalle);
+    panel.addEventListener("click", (e) => e.stopPropagation());
+    enviarAltura();
+}
+
+function cerrarPanelDetalle() {
+    document.getElementById("fondo-detalle").style.display = "none";
+    document.getElementById("panel-detalle").style.display = "none";
+}
+</script>
+</body>
+</html>

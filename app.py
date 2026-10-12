@@ -105,7 +105,7 @@ if st.session_state["usuario"] is None:
 
 usuario_actual = st.session_state["usuario"]
 
-st_autorefresh(interval=5000, key="auto_refresco")
+st_autorefresh(interval=25000, key="auto_refresco")  # Sincronización en vivo cada 25s (sin saturar la red)
 
 col_logo, col_titulo, col_sesion = st.columns([0.8, 6.2, 3])
 with col_logo:
@@ -203,33 +203,46 @@ with st.sidebar:
 
 dia_semana = fecha.isoweekday()
 
-conn = get_connection()
+# Funciones de consulta cacheadas para velocidad máxima
+@st.cache_data(ttl=60)
+def cargar_consultorios_base():
+    c = get_connection()
+    df = pd.read_sql("SELECT id, nombre FROM consultorios ORDER BY nombre;", c)
+    c.close()
+    return df
 
-# ---------------------------------------------------------
-# Consultorios y Horarios
-# ---------------------------------------------------------
-consultorios_df = pd.read_sql("SELECT id, nombre FROM consultorios ORDER BY nombre;", conn)
+@st.cache_data(ttl=60)
+def cargar_horarios_dia(dia):
+    c = get_connection()
+    df = pd.read_sql(
+        """
+        SELECT h.consultorio_id, p.id AS profesional_id, p.nombre AS profesional,
+               h.hora_desde, h.hora_hasta
+        FROM horarios_atencion h
+        JOIN profesionales p ON p.id = h.profesional_id
+        WHERE h.dia_semana = %s;
+        """,
+        c, params=(dia,),
+    )
+    c.close()
+    return df
+
+consultorios_df = cargar_consultorios_base().copy()
 
 if usuario_actual["rol"] == "profesional" and usuario_actual["profesional_id"] is not None:
+    c_prop = get_connection()
     consultorios_propios = pd.read_sql(
         """SELECT DISTINCT consultorio_id FROM horarios_atencion
            WHERE profesional_id = %s AND dia_semana = %s;""",
-        conn, params=(usuario_actual["profesional_id"], dia_semana),
+        c_prop, params=(usuario_actual["profesional_id"], dia_semana),
     )
+    c_prop.close()
     ids_propios = consultorios_propios["consultorio_id"].tolist()
     consultorios_df = consultorios_df[consultorios_df["id"].isin(ids_propios)].reset_index(drop=True)
 
-horarios_df = pd.read_sql(
-    """
-    SELECT h.consultorio_id, p.id AS profesional_id, p.nombre AS profesional,
-           h.hora_desde, h.hora_hasta
-    FROM horarios_atencion h
-    JOIN profesionales p ON p.id = h.profesional_id
-    WHERE h.dia_semana = %s;
-    """,
-    conn,
-    params=(dia_semana,),
-)
+horarios_df = cargar_horarios_dia(dia_semana)
+
+conn = get_connection()
 
 turnos_df = pd.read_sql(
     """
@@ -846,14 +859,16 @@ with tab_agenda:
         
         tipo_accion = resultado_click.get("tipo")
         
-        # 1. Click en celda libre -> Abrir modal con hora y consultorio
+        # 1. Click en celda libre -> Abrir modal con hora y consultorio inmediatamente
         if tipo_accion == "nuevo_turno":
             h_click = resultado_click.get("hora")
             c_click = resultado_click.get("consultorio_id")
-            st.session_state["modal_cons_id"] = c_click
-            st.session_state["modal_hora"] = h_click
-            st.session_state["mostrar_modal_turno"] = True
-            st.rerun()
+            if hasattr(st, "dialog"):
+                abrir_dialogo_turno(cons_id=c_click, hora=h_click)
+            else:
+                st.session_state["modal_cons_id"] = c_click
+                st.session_state["modal_hora"] = h_click
+                st.session_state["mostrar_modal_turno"] = True
 
         # 2. Eliminación
         elif resultado_click.get("estado") == "__eliminar__":
@@ -884,19 +899,13 @@ with tab_agenda:
                 conn_u.close()
                 st.rerun()
 
-    # Si se activó la apertura del modal
-    if st.session_state.get("mostrar_modal_turno"):
-        if hasattr(st, "dialog"):
-            abrir_dialogo_turno(
-                cons_id=st.session_state.get("modal_cons_id"),
-                hora=st.session_state.get("modal_hora")
+    # Fallback si no soporta st.dialog
+    if not hasattr(st, "dialog") and st.session_state.get("mostrar_modal_turno"):
+        with st.expander("➕ Cargar nuevo turno", expanded=True):
+            modal_contenido_nuevo_turno(
+                cons_id_inicial=st.session_state.get("modal_cons_id"),
+                hora_inicial_str=st.session_state.get("modal_hora")
             )
-        else:
-            with st.expander("➕ Cargar nuevo turno", expanded=True):
-                modal_contenido_nuevo_turno(
-                    cons_id_inicial=st.session_state.get("modal_cons_id"),
-                    hora_inicial_str=st.session_state.get("modal_hora")
-                )
 
     st.caption("⚡ Haz click en un casillero vacío para agregar un turno, o en la barra de color para cambiar su estado.")
 

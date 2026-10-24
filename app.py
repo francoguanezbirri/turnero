@@ -48,12 +48,18 @@ st.markdown("""
 /* Eliminar el parpadeo blanco/atenuado de Streamlit durante la recarga en segundo plano */
 [data-testid="stAppViewContainer"],
 [data-testid="stMainBlockContainer"],
-.element-container,
+.element-container {
+    opacity: 1 !important;
+    filter: none !important;
+    transition: none !important;
+}
 .stCustomComponentV1,
 .stCustomComponentV1 iframe {
     opacity: 1 !important;
     filter: none !important;
     transition: none !important;
+    min-height: 730px !important;
+    height: 730px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -626,8 +632,8 @@ body {{
     color: #94a3b8;
 }}
 .scroll-consultorio {{
-    height: 620px;
-    max-height: 70vh;
+    height: 640px;
+    min-height: 640px;
     overflow-y: scroll;
     overflow-x: hidden;
     position: relative;

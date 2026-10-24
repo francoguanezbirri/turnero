@@ -72,7 +72,11 @@
 // Protocolo mínimo de comunicación con Streamlit (sin librerías)
 // ---------------------------------------------------------
 function enviarAltura() {
-    const h = document.documentElement.scrollHeight;
+    const contenedor = document.getElementById("contenedor");
+    const docH = document.documentElement ? document.documentElement.scrollHeight : 0;
+    const bodyH = document.body ? document.body.scrollHeight : 0;
+    const contH = contenedor ? contenedor.scrollHeight : 0;
+    const h = Math.max(730, docH, bodyH, contH);
     window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: h }, "*");
 }
 function enviarValor(valor) {

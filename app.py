@@ -340,51 +340,162 @@ while actual < fin:
     filas_horas.append(actual.time())
     actual += timedelta(minutes=5)
 
-encabezados = {}
-for _, cons in consultorios_df.iterrows():
-    cons_id, cons_nombre = cons["id"], cons["nombre"]
-    profesionales_dia = horarios_df[horarios_df["consultorio_id"] == cons_id]["profesional"].unique()
-    if len(profesionales_dia) == 0:
-        encabezados[cons_nombre] = f"{cons_nombre}\n(sin atención)"
-    else:
-        encabezados[cons_nombre] = f"{cons_nombre}\n{' / '.join(profesionales_dia)}"
-
 ALTO_FILA = 24
-ALTO_ENCABEZADO = 54
+ALTO_ENCABEZADO = 48
+es_hoy = (fecha == date.today())
+hora_inicio_grilla = filas_horas[0] if filas_horas else None
+total_franjas = len(filas_horas)
 
-columnas = [encabezados[n] for n in consultorios_df["nombre"]]
-tabla = pd.DataFrame(index=[h.strftime("%H:%M") for h in filas_horas], columns=columnas)
-estado_tabla = pd.DataFrame(index=[h.strftime("%H:%M") for h in filas_horas], columns=columnas)
-tooltip_tabla = pd.DataFrame(index=[h.strftime("%H:%M") for h in filas_horas], columns=columnas)
-id_tabla = pd.DataFrame(index=[h.strftime("%H:%M") for h in filas_horas], columns=columnas)
-detalle_tabla = pd.DataFrame(index=[h.strftime("%H:%M") for h in filas_horas], columns=columnas)
+# -------------------------------------------------------------
+# CONSTRUCCIÓN DE COLUMNAS INDEPENDIENTES POR CONSULTORIO
+# -------------------------------------------------------------
+columnas_html = []
 
 for _, cons in consultorios_df.iterrows():
-    cons_id, cons_nombre = cons["id"], cons["nombre"]
-    col = encabezados[cons_nombre]
-    turnos_cons = turnos_df[turnos_df["consultorio_id"] == cons_id]
+    cons_id = int(cons["id"])
+    cons_nombre = cons["nombre"]
+    h_cons = horarios_df[horarios_df["consultorio_id"] == cons_id].sort_values("hora_desde")
+    t_cons = turnos_df[turnos_df["consultorio_id"] == cons_id]
 
-    for h in filas_horas:
-        etiqueta = h.strftime("%H:%M")
-        turno = turnos_cons[turnos_cons["hora"] == h]
-        if not turno.empty:
-            t = turno.iloc[0]
+    cant_turnos = len(t_cons["paciente_id"].dropna().unique()) if not t_cons.empty else 0
+    badge_turnos = f"{cant_turnos} turnos" if cant_turnos > 0 else "0 turnos"
+
+    # Si el consultorio no tiene atención ni turnos hoy
+    if h_cons.empty and t_cons.empty:
+        col_html = f"""
+        <div class="columna-consultorio">
+            <div class="header-consultorio">
+                <span class="titulo-cons">{cons_nombre}</span>
+                <span class="badge-cant vacio">Sin atención</span>
+            </div>
+            <div class="scroll-consultorio" data-cons-id="{cons_id}">
+                <div class="sin-atencion-box">
+                    <div class="icono-vacio">🏥</div>
+                    <div style="font-size:12.5px;color:#94a3b8;font-weight:600;">Sin profesionales asignados hoy</div>
+                </div>
+            </div>
+        </div>
+        """
+        columnas_html.append(col_html)
+        continue
+
+    # Turnos indexados por hora
+    turnos_dict = {}
+    for _, t in t_cons.iterrows():
+        turnos_dict[t["hora"]] = t
+
+    # Horarios del consultorio
+    turnos_atencion = []
+    for _, row in h_cons.iterrows():
+        turnos_atencion.append({
+            "profesional": row["profesional"],
+            "hora_desde": row["hora_desde"],
+            "hora_hasta": row["hora_hasta"],
+        })
+
+    def profesionales_en_hora(h):
+        return [ta["profesional"] for ta in turnos_atencion if ta["hora_desde"] <= h < ta["hora_hasta"]]
+
+    # Mapa de horas donde inicia la atención de un profesional
+    divisores_prof = {}
+    for ta in turnos_atencion:
+        hd = ta["hora_desde"]
+        if hd not in divisores_prof:
+            divisores_prof[hd] = []
+        divisores_prof[hd].append({
+            "profesional": ta["profesional"],
+            "desde": ta["hora_desde"].strftime("%H:%M"),
+            "hasta": ta["hora_hasta"].strftime("%H:%M")
+        })
+
+    filas_cons_html = []
+    skip_slots = 0
+    en_intervalo = False
+
+    for idx, h in enumerate(filas_horas):
+        h_str = h.strftime("%H:%M")
+        es_en_punto = (h.minute == 0)
+        clase_en_punto = " hora-en-punto" if es_en_punto else ""
+
+        # 1. DIVISOR DE PROFESIONAL (encabezado cuando arranca un profesional en este consultorio)
+        if h in divisores_prof:
+            items_doc = []
+            for d in divisores_prof[h]:
+                items_doc.append(f"<span class='nombre-prof'>{d['profesional']}</span> <span class='rango-prof'>{d['desde']} a {d['hasta']}</span>")
+            banner_contenido = " &bull; ".join(items_doc)
+            filas_cons_html.append(f"""
+                <tr class="fila-divisor">
+                    <td colspan="2" class="celda-divisor">
+                        <div class="divisor-profesional">
+                            <span class="icono-prof">🩺</span>
+                            <div class="info-prof">{banner_contenido}</div>
+                        </div>
+                    </td>
+                </tr>
+            """)
+            en_intervalo = False
+
+        profs_activos = profesionales_en_hora(h)
+        hay_atencion = len(profs_activos) > 0
+
+        # 2. DIVISOR DE INTERVALO / FIN DE ATENCIÓN
+        if not hay_atencion and not en_intervalo and any(ta["hora_hasta"] == h for ta in turnos_atencion):
+            proximos = [ta for ta in turnos_atencion if ta["hora_desde"] > h]
+            if proximos:
+                prox_inicio = min(p["hora_desde"] for p in proximos)
+                filas_cons_html.append(f"""
+                    <tr class="fila-divisor fila-intervalo">
+                        <td colspan="2" class="celda-divisor">
+                            <div class="divisor-pausa">
+                                ☕ <b>Intervalo</b> ({h_str} a {prox_inicio.strftime('%H:%M')})
+                            </div>
+                        </td>
+                    </tr>
+                """)
+                en_intervalo = True
+            else:
+                filas_cons_html.append(f"""
+                    <tr class="fila-divisor fila-intervalo">
+                        <td colspan="2" class="celda-divisor">
+                            <div class="divisor-pausa fin-atencion">
+                                🏁 <b>Fin de atención</b> ({h_str})
+                            </div>
+                        </td>
+                    </tr>
+                """)
+                en_intervalo = True
+
+        if skip_slots > 0:
+            skip_slots -= 1
+            filas_cons_html.append(f'<tr class="fila-slot{clase_en_punto}"><td class="hora-cell">{h_str}</td></tr>')
+            continue
+
+        # 3. TURNO OCUPADO
+        if h in turnos_dict:
+            t = turnos_dict[h]
+            # Calcular span de duración
+            span = 1
+            k = idx + 1
+            while k < len(filas_horas) and filas_horas[k] in turnos_dict:
+                t_sig = turnos_dict[filas_horas[k]]
+                if t_sig["paciente_id"] == t["paciente_id"] and t_sig["servicio"] == t["servicio"]:
+                    span += 1
+                    k += 1
+                else:
+                    break
+            skip_slots = span - 1
+
+            ids_bloque = [str(turnos_dict[filas_horas[x]]["id"]) for x in range(idx, idx + span)]
+
             tel = t["telefono"] if t["telefono"] else "sin tel."
             servicio = t["servicio"] if t["servicio"] else "Consulta"
-            tooltip = f'Tel: {tel} · {t["obra_social"]}'
+            tooltip = f"Tel: {tel} · {t['obra_social']}"
             if t["modificado_por_nombre"] and pd.notna(t["modificado_en"]):
-                tooltip += f' · Modificado por {t["modificado_por_nombre"]} el {t["modificado_en"].strftime("%d/%m %H:%M")}'
+                tooltip += f" · Modificado por {t['modificado_por_nombre']} el {t['modificado_en'].strftime('%d/%m %H:%M')}"
             elif t["creado_por_nombre"]:
-                tooltip += f' · Cargado por {t["creado_por_nombre"]}'
-            nombre_completo = f'{t["apellido_paciente"]}, {t["paciente"]}'.strip(", ").upper()
-            label_html = (
-                f'<div class="nombre-paciente">{nombre_completo}</div>'
-                f'<div class="detalle-turno">{t["profesional"]}: {servicio}</div>'
-            )
-            tabla.loc[etiqueta, col] = label_html
-            estado_tabla.loc[etiqueta, col] = t["estado"]
-            tooltip_tabla.loc[etiqueta, col] = tooltip
-            id_tabla.loc[etiqueta, col] = int(t["id"])
+                tooltip += f" · Cargado por {t['creado_por_nombre']}"
+
+            nombre_completo = f"{t['apellido_paciente']}, {t['paciente']}".strip(", ").upper()
 
             detalle = {
                 "nombre": nombre_completo,
@@ -394,7 +505,8 @@ for _, cons in consultorios_df.iterrows():
                 "profesional": t["profesional"],
                 "servicio": servicio,
                 "consultorio": cons_nombre,
-                "hora": etiqueta,
+                "hora": h_str,
+                "fecha": fecha.strftime("%d/%m/%Y"),
                 "estado": t["estado"],
                 "creado_por": t["creado_por_nombre"] or "—",
                 "creado_en": t["creado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t["creado_en"]) else "—",
@@ -402,161 +514,281 @@ for _, cons in consultorios_df.iterrows():
                 "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t["modificado_en"]) else "—",
                 "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t["paciente_id"]) else [],
             }
-            detalle_json = json.dumps(detalle, ensure_ascii=False)
-            detalle_tabla.loc[etiqueta, col] = base64.b64encode(detalle_json.encode("utf-8")).decode("ascii")
+            detalle_b64 = base64.b64encode(json.dumps(detalle, ensure_ascii=False).encode("utf-8")).decode("ascii")
+
+            filas_cons_html.append(f"""
+                <tr class="fila-slot{clase_en_punto}">
+                    <td class="hora-cell">{h_str}</td>
+                    <td class="celda-turno" rowspan="{span}" title="{tooltip}">
+                        <div class="tarjeta-turno {clase_estado(t['estado'])}" data-ids="{','.join(ids_bloque)}" data-estado="{t['estado']}">
+                            <div class="barra-estado"></div>
+                            <div class="contenido-turno" data-detalle="{detalle_b64}">
+                                <div class="nombre-paciente">{nombre_completo}</div>
+                                <div class="detalle-turno">{t['profesional']}: {servicio}</div>
+                            </div>
+                        </div>
+                    </td>
+                </tr>
+            """)
         else:
-            tabla.loc[etiqueta, col] = ""
-            estado_tabla.loc[etiqueta, col] = ""
-            tooltip_tabla.loc[etiqueta, col] = ""
-            id_tabla.loc[etiqueta, col] = None
-            detalle_tabla.loc[etiqueta, col] = ""
+            # 4. CASILLERO LIBRE O FUERA DE HORARIO
+            if hay_atencion:
+                filas_cons_html.append(f"""
+                    <tr class="fila-slot{clase_en_punto}">
+                        <td class="hora-cell">{h_str}</td>
+                        <td class="libre" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Click para nuevo turno ({h_str} - {cons_nombre})">
+                            <span class="slot-libre-plus">+</span>
+                        </td>
+                    </tr>
+                """)
+            else:
+                filas_cons_html.append(f"""
+                    <tr class="fila-slot slot-inactivo{clase_en_punto}">
+                        <td class="hora-cell inactivo">{h_str}</td>
+                        <td class="libre libre-inactiva" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Fuera de horario · Click para turno extraordinario ({h_str})">
+                            <span class="slot-libre-plus">+</span>
+                        </td>
+                    </tr>
+                """)
 
-# Armar HTML de la grilla
-horas_index = list(tabla.index)
-skip = {col: 0 for col in columnas}
-filas_html = []
-
-for i, hora_label in enumerate(horas_index):
-    fila = f'<tr><td class="hora-cell">{hora_label}</td>'
-    for _, cons in consultorios_df.iterrows():
-        cons_id, cons_nombre = cons["id"], cons["nombre"]
-        col = encabezados[cons_nombre]
-        if skip[col] > 0:
-            skip[col] -= 1
-            continue
-        val = tabla.loc[hora_label, col]
-        if val == "":
-            fila += (
-                f'<td class="libre" data-hora="{hora_label}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" '
-                f'title="Click para nuevo turno ({hora_label} - {cons_nombre})">'
-                f'<span class="slot-libre-plus">+</span>'
-                f'</td>'
-            )
-        else:
-            estado_val = estado_tabla.loc[hora_label, col]
-            tooltip_val = tooltip_tabla.loc[hora_label, col]
-            span = 1
-            j = i + 1
-            while j < len(horas_index) and tabla.loc[horas_index[j], col] == val:
-                span += 1
-                j += 1
-            skip[col] = span - 1
-            ids_bloque = [
-                str(id_tabla.loc[horas_index[k], col])
-                for k in range(i, i + span)
-                if id_tabla.loc[horas_index[k], col] is not None
-            ]
-            detalle_val = detalle_tabla.loc[hora_label, col]
-            fila += (
-                f'<td class="celda-turno" rowspan="{span}" title="{tooltip_val}">'
-                f'<div class="tarjeta-turno {clase_estado(estado_val)}" '
-                f'data-ids="{",".join(ids_bloque)}" data-estado="{estado_val}">'
-                f'<div class="barra-estado"></div>'
-                f'<div class="contenido-turno" data-detalle="{detalle_val}">{val}</div>'
-                f'</div>'
-                f'</td>'
-            )
-    fila += "</tr>"
-    filas_html.append(fila)
-
-encabezados_html = "".join(f'<th>{c.replace(chr(10), "<br>")}</th>' for c in columnas)
-
-es_hoy = fecha == date.today()
-linea_ahora_html = '<div class="ahora-linea" id="ahora-linea" style="display:none;"><span class="ahora-etiqueta" id="ahora-etiqueta"></span></div>' if es_hoy else ""
-hora_inicio_grilla = filas_horas[0] if filas_horas else None
-total_franjas = len(filas_horas)
-
-script_linea = ""
-if es_hoy and hora_inicio_grilla:
-    script_linea = f"""
-    <script>
-    function actualizarLineaAhora() {{
-        const ahora = new Date();
-        const inicioGrilla = new Date(ahora);
-        inicioGrilla.setHours({hora_inicio_grilla.hour}, {hora_inicio_grilla.minute}, 0, 0);
-        const minutosDesdeInicio = (ahora - inicioGrilla) / 60000;
-        const franjaFraccion = minutosDesdeInicio / 5;
-        const linea = document.getElementById('ahora-linea');
-        const etiqueta = document.getElementById('ahora-etiqueta');
-        if (!linea) return;
-        if (minutosDesdeInicio < 0 || franjaFraccion > {total_franjas}) {{
-            linea.style.display = 'none';
-            return;
-        }}
-        const offset = {ALTO_ENCABEZADO} + franjaFraccion * {ALTO_FILA};
-        linea.style.display = 'block';
-        linea.style.top = offset + 'px';
-        const hh = String(ahora.getHours()).padStart(2, '0');
-        const mm = String(ahora.getMinutes()).padStart(2, '0');
-        etiqueta.textContent = hh + ':' + mm;
-    }}
-    actualizarLineaAhora();
-    setInterval(actualizarLineaAhora, 1000);
-    </script>
+    tabla_body = "\n".join(filas_cons_html)
+    col_html = f"""
+    <div class="columna-consultorio">
+        <div class="header-consultorio">
+            <span class="titulo-cons">{cons_nombre}</span>
+            <span class="badge-cant">{badge_turnos}</span>
+        </div>
+        <div class="scroll-consultorio" data-cons-id="{cons_id}">
+            <table class="tabla-cons">
+                <tbody>
+                    {tabla_body}
+                </tbody>
+            </table>
+        </div>
+    </div>
     """
+    columnas_html.append(col_html)
 
 tabla_html = f"""
 <style>
-body {{ margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; }}
-.agenda-wrap {{
-    position: relative;
-    max-height: 650px;
-    overflow-y: auto;
-    border: 1px solid #e2e4e9;
-    border-radius: 12px;
+body {{
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: transparent;
+}}
+.tablero-consultorios {{
+    display: flex;
+    flex-direction: row;
+    gap: 14px;
+    align-items: stretch;
+    width: 100%;
+    overflow-x: auto;
+    padding: 4px 2px 14px 2px;
+    box-sizing: border-box;
+}}
+.columna-consultorio {{
+    flex: 1 1 280px;
+    min-width: 270px;
+    max-width: 380px;
     background: #ffffff;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.03);
-}}
-.agenda-tabla {{ border-collapse: separate; border-spacing: 0; width: 100%; font-size: 13px; table-layout: fixed; }}
-.agenda-tabla th {{
-    position: sticky; top: 0; background: #fafafc; z-index: 2;
-    padding: 8px; border-bottom: 2px solid #e5e7eb; text-align: left; font-size: 12px;
-    color: #374151; font-weight: 700;
-    height: {ALTO_ENCABEZADO}px; box-sizing: border-box;
-}}
-.agenda-tabla td {{
-    border: none; padding: 0; vertical-align: top;
-    height: {ALTO_FILA}px; box-sizing: border-box;
-    border-right: 1px solid #f0f2f5;
-}}
-.agenda-tabla td:last-child {{ border-right: none; }}
-.hora-cell {{
-    color: #9ca3af; font-size: 10.5px; white-space: nowrap; width: 52px;
-    padding-top: 3px !important; text-align: right; padding-right: 8px !important;
-    background: #fbfbfc; border-right: 1px solid #e5e7eb !important; font-weight: 500;
-}}
-.hora-header {{ width: 52px; background: #fbfbfc !important; border-right: 1px solid #e5e7eb !important; }}
-.celda-turno {{ padding: 1.5px 3px !important; }}
-.tarjeta-turno {{
-    height: 100%; box-sizing: border-box;
-    display: flex; align-items: stretch;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    display: flex;
+    flex-direction: column;
     overflow: hidden;
-    border-radius: 8px;
+}}
+.header-consultorio {{
+    padding: 10px 14px;
+    background: #f8fafc;
+    border-bottom: 2px solid #e2e8f0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}}
+.header-consultorio .titulo-cons {{
+    font-size: 15px;
+    font-weight: 700;
+    color: #0f172a;
+    letter-spacing: -0.01em;
+}}
+.header-consultorio .badge-cant {{
+    font-size: 11px;
+    font-weight: 600;
+    color: #475569;
+    background: #e2e8f0;
+    padding: 3px 8px;
+    border-radius: 12px;
+}}
+.header-consultorio .badge-cant.vacio {{
+    background: #f1f5f9;
+    color: #94a3b8;
+}}
+.scroll-consultorio {{
+    height: 620px;
+    max-height: 70vh;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    position: relative;
+    background: #ffffff;
+}}
+.scroll-consultorio::-webkit-scrollbar {{
+    width: 6px;
+}}
+.scroll-consultorio::-webkit-scrollbar-track {{
+    background: #f8fafc;
+}}
+.scroll-consultorio::-webkit-scrollbar-thumb {{
+    background: #cbd5e1;
+    border-radius: 4px;
+}}
+.scroll-consultorio::-webkit-scrollbar-thumb:hover {{
+    background: #94a3b8;
+}}
+.tabla-cons {{
+    border-collapse: collapse;
+    width: 100%;
+    table-layout: fixed;
+    font-size: 12px;
+}}
+.hora-cell {{
+    width: 48px;
+    min-width: 48px;
+    max-width: 48px;
+    padding: 0 4px;
+    text-align: center;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #94a3b8;
+    background: #fafbfc;
+    border-right: 1px solid #f1f5f9;
+    border-bottom: 1px solid #f8fafc;
+    height: 24px;
+    box-sizing: border-box;
+    vertical-align: middle;
+    user-select: none;
+}}
+.hora-en-punto .hora-cell {{
+    color: #334155;
+    font-weight: 700;
+    border-top: 1px solid #e2e8f0;
+    background: #f1f5f9;
+}}
+.hora-en-punto td {{
+    border-top: 1px solid #e2e8f0;
+}}
+.fila-divisor {{
+    position: sticky;
+    top: 0;
+    z-index: 10;
+}}
+.celda-divisor {{
+    padding: 0;
+    border: none;
+}}
+.divisor-profesional {{
+    background: #2563eb;
+    color: #ffffff;
+    padding: 7px 10px;
+    font-size: 11.5px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.12);
+    letter-spacing: 0.01em;
+}}
+.divisor-profesional .icono-prof {{
+    font-size: 14px;
+}}
+.divisor-profesional .info-prof {{
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}}
+.divisor-profesional .rango-prof {{
+    font-size: 10.5px;
+    font-weight: 500;
+    background: rgba(255,255,255,0.22);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: #ffffff;
+}}
+.divisor-pausa {{
+    background: #f8fafc;
+    color: #64748b;
+    border-top: 1px dashed #cbd5e1;
+    border-bottom: 1px dashed #cbd5e1;
+    padding: 5px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    text-align: center;
+}}
+.divisor-pausa.fin-atencion {{
+    background: #fef2f2;
+    color: #b91c1c;
+    border-color: #fecaca;
+}}
+.celda-turno {{
+    padding: 1.5px 3px !important;
+    border: none;
+    vertical-align: top;
+}}
+.tarjeta-turno {{
+    height: 100%;
+    box-sizing: border-box;
+    display: flex;
+    align-items: stretch;
+    overflow: hidden;
+    border-radius: 7px;
     background: #f4f4f6;
-    box-shadow: 0 1px 2px rgba(20,20,30,0.04);
+    box-shadow: 0 1px 3px rgba(20,20,30,0.05);
     cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.1s;
+}}
+.tarjeta-turno:hover {{
+    transform: translateY(-1px);
+    box-shadow: 0 3px 8px rgba(20,20,30,0.12);
 }}
 .barra-estado {{
-    width: 6px; flex-shrink: 0; background: #ccc;
-    border-radius: 8px 0 0 8px;
+    width: 6px;
+    flex-shrink: 0;
+    background: #ccc;
+    border-radius: 7px 0 0 7px;
     cursor: pointer;
     transition: width 0.15s ease;
 }}
-.barra-estado:hover {{ width: 12px; }}
+.barra-estado:hover {{
+    width: 12px;
+}}
 .contenido-turno {{
     flex: 1;
-    padding: 4px 8px; overflow: hidden; min-width: 0;
+    padding: 3px 6px;
+    overflow: hidden;
+    min-width: 0;
     cursor: pointer;
 }}
 .nombre-paciente {{
-    font-weight: 700; text-transform: uppercase; font-size: 12px;
-    color: #1f2937; line-height: 1.25;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 11.5px;
+    color: #1f2937;
+    line-height: 1.25;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }}
 .detalle-turno {{
-    font-weight: 400; font-size: 10.5px; color: #6b7280;
-    line-height: 1.3; margin-top: 1px;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font-weight: 400;
+    font-size: 10px;
+    color: #6b7280;
+    line-height: 1.25;
+    margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }}
 .estado-pendiente                 .barra-estado {{ background: #9ca3af; }}
 .estado-confirmado                .barra-estado {{ background: #10b981; }}
@@ -576,14 +808,17 @@ body {{ margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; }}
 .estado-cancelado-por-profesional {{ background-color: #fee2e2; }}
 .estado-cancelado-por-paciente .nombre-paciente,
 .estado-cancelado-por-profesional .nombre-paciente {{
-    text-decoration: line-through; color: #9ca3af;
+    text-decoration: line-through;
+    color: #9ca3af;
 }}
 .libre {{
     background: transparent;
     cursor: pointer;
     position: relative;
     transition: background 0.12s ease;
-    border-bottom: 1px dashed #f3f4f6;
+    border-bottom: 1px dashed #f1f5f9;
+    height: 24px;
+    box-sizing: border-box;
 }}
 .libre:hover {{
     background: #eef2ff !important;
@@ -600,25 +835,43 @@ body {{ margin: 0; font-family: -apple-system, "Segoe UI", sans-serif; }}
 .libre:hover .slot-libre-plus {{
     display: block;
 }}
-.ahora-linea {{
-    position: absolute; left: 0; right: 0; height: 2px; background: #2563eb;
-    z-index: 3; pointer-events: none; border-radius: 2px;
+.libre-inactiva {{
+    background: #fafbfc;
+    border-bottom: 1px solid #f8fafc;
 }}
-.ahora-etiqueta {{
-    position: absolute; left: 4px; top: -8px; background: #2563eb; color: #fff;
-    font-size: 9.5px; padding: 1px 6px; border-radius: 8px; font-weight: 600;
+.hora-cell.inactivo {{
+    color: #cbd5e1;
+}}
+.sin-atencion-box {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 300px;
+    color: #94a3b8;
+    text-align: center;
+    padding: 20px;
+}}
+.icono-vacio {{
+    font-size: 36px;
+    margin-bottom: 8px;
+    opacity: 0.6;
+}}
+@media (max-width: 768px) {{
+    .tablero-consultorios {{
+        scroll-snap-type: x mandatory;
+        gap: 10px;
+    }}
+    .columna-consultorio {{
+        min-width: 86vw;
+        max-width: 90vw;
+        scroll-snap-align: start;
+    }}
 }}
 </style>
-<div class="agenda-wrap">
-{linea_ahora_html}
-<table class="agenda-tabla">
-<thead><tr><th class="hora-header"></th>{encabezados_html}</tr></thead>
-<tbody>
-{''.join(filas_html)}
-</tbody>
-</table>
+<div class="tablero-consultorios">
+{''.join(columnas_html)}
 </div>
-{script_linea}
 """
 
 ICONO_ESTADO = {
@@ -653,13 +906,28 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
         st.warning("Este consultorio no tiene ningún profesional atendiendo hoy.")
         return
 
+    idx_prof = 0
+    if hora_inicial_str:
+        try:
+            h_init = datetime.strptime(hora_inicial_str, "%H:%M").time()
+            profs_hora = horarios_cons[
+                (horarios_cons["hora_desde"] <= h_init) & (h_init < horarios_cons["hora_hasta"])
+            ]
+            if not profs_hora.empty:
+                prof_match = profs_hora.iloc[0]["profesional"]
+                profs_list = profesionales_cons["profesional"].tolist()
+                if prof_match in profs_list:
+                    idx_prof = profs_list.index(prof_match)
+        except Exception:
+            pass
+
     with col2:
         if len(profesionales_cons) == 1:
             profesional_sel_nombre = profesionales_cons.iloc[0]["profesional"]
             profesional_id_sel = int(profesionales_cons.iloc[0]["profesional_id"])
             st.text_input("Profesional", value=profesional_sel_nombre, disabled=True)
         else:
-            profesional_sel_nombre = st.selectbox("Profesional", options=profesionales_cons["profesional"])
+            profesional_sel_nombre = st.selectbox("Profesional", options=profesionales_cons["profesional"], index=idx_prof)
             profesional_id_sel = int(
                 profesionales_cons.loc[profesionales_cons["profesional"] == profesional_sel_nombre, "profesional_id"].iloc[0]
             )
@@ -801,6 +1069,9 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
             except psycopg2.errors.UniqueViolation:
                 conn_w.rollback()
                 st.error("Ese horario ya fue ocupado.")
+            except Exception as e:
+                conn_w.rollback()
+                st.error(f"Error al guardar turno: {e}")
             finally:
                 cur.close()
                 conn_w.close()

@@ -80,18 +80,57 @@ function enviarValor(valor) {
 }
 window.parent.postMessage({ isStreamlitMessage: true, type: "streamlit:componentReady", apiVersion: 1 }, "*");
 
-let ESTADOS = [];
-let ICONOS = {};
+let ultimoHtmlRenderizado = "";
 
 window.addEventListener("message", (event) => {
     if (!event.data || event.data.type !== "streamlit:render") return;
     const args = event.data.args || {};
-    document.getElementById("contenedor").innerHTML = args.html || "";
-    ESTADOS = args.estados || [];
-    ICONOS = args.iconos || {};
+    
+    // No interrumpir si el usuario tiene abierto el panel de detalle o menú de estado
+    const panelDetalle = document.getElementById("panel-detalle");
+    const menuEstado = document.getElementById("menu-estado");
+    const estaInteractuando = (panelDetalle && panelDetalle.style.display === "block") || 
+                              (menuEstado && menuEstado.style.display === "block");
+    if (estaInteractuando) return;
+
+    // Solo reconstruir el DOM si los datos realmente cambiaron
+    if (args.html && args.html !== ultimoHtmlRenderizado) {
+        ultimoHtmlRenderizado = args.html;
+
+        // Guardar posiciones de scroll actuales de cada consultorio
+        const scrollMap = {};
+        document.querySelectorAll(".scroll-consultorio").forEach((el) => {
+            const cid = el.getAttribute("data-cons-id");
+            if (cid) scrollMap[cid] = el.scrollTop;
+        });
+
+        document.getElementById("contenedor").innerHTML = args.html;
+        ESTADOS = args.estados || [];
+        ICONOS = args.iconos || {};
+        configurarClicksEnTurnos();
+
+        // Restaurar posición de scroll o inicializar si es la primera carga
+        document.querySelectorAll(".scroll-consultorio").forEach((el) => {
+            const cid = el.getAttribute("data-cons-id");
+            if (cid && scrollMap[cid] !== undefined) {
+                el.scrollTop = scrollMap[cid];
+            } else if (args.es_hoy) {
+                const elAhora = el.querySelector(".slot-ahora");
+                if (elAhora) {
+                    el.scrollTop = Math.max(0, elAhora.offsetTop - 80);
+                } else {
+                    const primerDiv = el.querySelector(".fila-divisor");
+                    if (primerDiv) el.scrollTop = Math.max(0, primerDiv.offsetTop - 10);
+                }
+            } else {
+                const primerDiv = el.querySelector(".fila-divisor");
+                if (primerDiv) el.scrollTop = Math.max(0, primerDiv.offsetTop - 10);
+            }
+        });
+
+        enviarAltura();
+    }
     configurarLineaAhora(args);
-    configurarClicksEnTurnos();
-    enviarAltura();
 });
 
 // ---------------------------------------------------------
@@ -247,6 +286,12 @@ function abrirPanelDetalle(contenidoEl) {
             <div class="titulo-card">Contacto</div>
             <div class="fila-dato"><span class="etiqueta">Teléfono</span><span class="valor">${d.telefono}</span></div>
             <div class="fila-dato"><span class="etiqueta">Obra social</span><span class="valor">${d.obra_social}</span></div>
+            ${d.telefono && d.telefono.replace(/\D/g, '') ? `
+            <div style="margin-top: 10px;">
+                <a href="https://wa.me/${d.telefono.replace(/\D/g, '')}?text=${encodeURIComponent('Hola ' + d.nombre + ', te recordamos tu turno el ' + (d.fecha || '') + ' a las ' + d.hora + ' hs con ' + d.profesional + ' en ' + d.consultorio + '.')}" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:6px;background:#25d366;color:#ffffff;text-decoration:none;padding:8px 12px;border-radius:8px;font-weight:700;font-size:12px;box-shadow:0 1px 4px rgba(37,211,102,0.3);text-transform:none;">
+                    💬 Enviar recordatorio por WhatsApp
+                </a>
+            </div>` : ''}
         </div>
 
         <div class="tarjeta-info">

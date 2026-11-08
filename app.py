@@ -263,7 +263,11 @@ turnos_df = pd.read_sql(
            t.creado_en,
            uc.nombre_completo AS creado_por_nombre,
            um.nombre_completo AS modificado_por_nombre,
-           t.modificado_en
+           t.modificado_en,
+           t.traer_dinero,
+           t.traer_credencial,
+           t.traer_bonos,
+           t.traer_ordenes
     FROM turnos t
     JOIN profesionales p ON p.id = t.profesional_id
     LEFT JOIN pacientes pac ON pac.id = t.paciente_id
@@ -501,7 +505,26 @@ for _, cons in consultorios_df.iterrows():
 
             tel = t["telefono"] if t["telefono"] else "sin tel."
             servicio = t["servicio"] if t["servicio"] else "Consulta"
+
+            # Formatear requisitos que debe traer
+            items_traer = []
+            if pd.notna(t.get("traer_dinero")) and str(t.get("traer_dinero")).strip():
+                val_dinero = str(t.get("traer_dinero")).strip()
+                if not val_dinero.startswith("$"):
+                    val_dinero = f"${val_dinero}"
+                items_traer.append(f"Abonar {val_dinero}")
+            if t.get("traer_credencial") is True:
+                items_traer.append("Credencial / Carnet")
+            if pd.notna(t.get("traer_bonos")) and int(t.get("traer_bonos", 0)) > 0:
+                cb = int(t.get("traer_bonos"))
+                items_traer.append(f"{cb} bono{'s' if cb > 1 else ''}")
+            if pd.notna(t.get("traer_ordenes")) and int(t.get("traer_ordenes", 0)) > 0:
+                co = int(t.get("traer_ordenes"))
+                items_traer.append(f"{co} orden{'es' if co > 1 else ''}")
+
             tooltip = f"Tel: {tel} · {t['obra_social']}"
+            if items_traer:
+                tooltip += " · Traer: " + ", ".join(items_traer)
             if t["modificado_por_nombre"] and pd.notna(t["modificado_en"]):
                 tooltip += f" · Modificado por {t['modificado_por_nombre']} el {t['modificado_en'].strftime('%d/%m %H:%M')}"
             elif t["creado_por_nombre"]:
@@ -522,6 +545,12 @@ for _, cons in consultorios_df.iterrows():
                 else ""
             )
 
+            badge_traer_html = (
+                f'<div class="traer-turno">📌 Traer: {", ".join(items_traer)}</div>'
+                if (items_traer and span >= 4)
+                else ""
+            )
+
             detalle = {
                 "nombre": nombre_completo,
                 "dni": t["dni"] if pd.notna(t["dni"]) and t["dni"] else "—",
@@ -538,6 +567,7 @@ for _, cons in consultorios_df.iterrows():
                 "modificado_por": t["modificado_por_nombre"] or "—",
                 "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t["modificado_en"]) else "—",
                 "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t["paciente_id"]) else [],
+                "items_traer": items_traer,
             }
             detalle_b64 = base64.b64encode(json.dumps(detalle, ensure_ascii=False).encode("utf-8")).decode("ascii")
 
@@ -551,6 +581,7 @@ for _, cons in consultorios_df.iterrows():
                                 <div class="nombre-paciente">{nombre_completo}</div>
                                 <div class="detalle-turno">{t['profesional']}: {servicio}</div>
                                 {rango_badge_html}
+                                {badge_traer_html}
                             </div>
                         </div>
                     </td>
@@ -826,6 +857,20 @@ body {{
     overflow: hidden;
     text-overflow: ellipsis;
 }}
+.traer-turno {{
+    font-weight: 600;
+    font-size: 9.5px;
+    color: #b45309;
+    background: #fef3c7;
+    border: 1px solid #fde68a;
+    padding: 1px 5px;
+    border-radius: 4px;
+    line-height: 1.25;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}}
 .estado-pendiente                 .barra-estado {{ background: #9ca3af; }}
 .estado-confirmado                .barra-estado {{ background: #10b981; }}
 .estado-en-sala-de-espera         .barra-estado {{ background: #3b82f6; }}
@@ -1070,6 +1115,21 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
                 elif os_sel != "— Elegir —":
                     obra_social_id_nueva = int(obras_sociales_df.loc[obras_sociales_df["nombre"] == os_sel, "id"].iloc[0])
 
+    st.markdown("---")
+    st.markdown("##### 📋 Lo que debe traer el paciente al turno")
+    c_req1, c_req2 = st.columns(2)
+    with c_req1:
+        traer_dinero = st.text_input("💵 Dinero / Coseguro a abonar", placeholder="Ej: $5000 o Efectivo", key="input_traer_dinero")
+        traer_credencial = st.checkbox("💳 Traer credencial / carnet", value=True, key="check_traer_cred")
+    with c_req2:
+        c_b1, c_b2 = st.columns(2)
+        with c_b1:
+            check_bonos = st.checkbox("📑 Bonos", key="check_bonos")
+            cant_bonos = int(st.number_input("Cant. bonos", min_value=1, max_value=20, value=1, key="num_bonos")) if check_bonos else 0
+        with c_b2:
+            check_ordenes = st.checkbox("📝 Órdenes", key="check_ordenes")
+            cant_ordenes = int(st.number_input("Cant. órdenes", min_value=1, max_value=20, value=1, key="num_ordenes")) if check_ordenes else 0
+
     puede_guardar = dni_input and hora_sel is not None and (
         paciente_id_existente is not None or (apellido_nuevo and nombre_nuevo)
     )
@@ -1095,9 +1155,14 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
                 for h in horas_a_reservar:
                     cur.execute(
                         """INSERT INTO turnos (fecha, hora, profesional_id, consultorio_id, paciente_id,
-                                                servicio_id, estado, creado_por)
-                           VALUES (%s,%s,%s,%s,%s,%s,'pendiente',%s);""",
-                        (fecha, h, profesional_id_sel, cons_id_sel, paciente_id, servicio_id_sel, usuario_actual["id"]),
+                                                servicio_id, estado, creado_por,
+                                                traer_dinero, traer_credencial, traer_bonos, traer_ordenes)
+                           VALUES (%s,%s,%s,%s,%s,%s,'pendiente',%s,%s,%s,%s,%s);""",
+                        (fecha, h, profesional_id_sel, cons_id_sel, paciente_id, servicio_id_sel, usuario_actual["id"],
+                         traer_dinero.strip() if traer_dinero else None,
+                         traer_credencial,
+                         cant_bonos,
+                         cant_ordenes),
                     )
                 conn_w.commit()
                 st.session_state["mostrar_modal_turno"] = False

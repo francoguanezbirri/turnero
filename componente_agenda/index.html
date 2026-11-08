@@ -257,10 +257,14 @@ function abrirPanelDetalle(contenidoEl) {
     try {
         const binString = atob(b64);
         const bytes = Uint8Array.from(binString, (m) => m.charCodeAt(0));
-        d = JSON.parse(new TextDecoder().decode(bytes));
+        let jsonStr = new TextDecoder().decode(bytes);
+        jsonStr = jsonStr.replace(/:\s*NaN\b/g, ': null');
+        d = JSON.parse(jsonStr);
     } catch (err) {
         try {
-            d = JSON.parse(decodeURIComponent(escape(atob(b64))));
+            let jsonStr = decodeURIComponent(escape(atob(b64)));
+            jsonStr = jsonStr.replace(/:\s*NaN\b/g, ': null');
+            d = JSON.parse(jsonStr);
         } catch (e2) {
             console.error("Error al decodificar detalle:", e2);
             return;

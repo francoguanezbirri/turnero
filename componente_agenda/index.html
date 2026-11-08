@@ -280,6 +280,22 @@ function abrirPanelDetalle(contenidoEl) {
         `).join("");
     }
 
+    let requisitosHtml = '';
+    let textoRequisitosWa = '';
+    if (d.items_traer && d.items_traer.length > 0) {
+        requisitosHtml = `
+        <div class="tarjeta-info" style="border-left: 4px solid #f59e0b; background: #fffbeb;">
+            <div class="titulo-card" style="color: #b45309; margin-bottom: 5px;">📋 A su turno debe traer</div>
+            <div style="font-size: 13px; line-height: 1.6; color: #1f2937;">
+                ${d.items_traer.map((it) => `<div>• <b>${it}</b></div>`).join("")}
+            </div>
+        </div>
+        `;
+        textoRequisitosWa = '\n\n*A su turno debe traer:*\n' + d.items_traer.map((it) => '• ' + it).join('\n');
+    }
+
+    const textoMensajeWa = 'Hola ' + d.nombre + ', te recordamos tu turno el ' + (d.fecha || '') + ' a las ' + d.hora + ' hs con ' + d.profesional + ' en ' + d.consultorio + '.' + textoRequisitosWa;
+
     const panel = document.getElementById("panel-detalle");
     panel.innerHTML = `
         <button class="cerrar" id="btn-cerrar-detalle">✕</button>
@@ -292,11 +308,13 @@ function abrirPanelDetalle(contenidoEl) {
             <div class="fila-dato"><span class="etiqueta">Obra social</span><span class="valor">${d.obra_social}</span></div>
             ${d.telefono && d.telefono.replace(/\D/g, '') ? `
             <div style="margin-top: 10px;">
-                <a href="https://wa.me/${d.telefono.replace(/\D/g, '')}?text=${encodeURIComponent('Hola ' + d.nombre + ', te recordamos tu turno el ' + (d.fecha || '') + ' a las ' + d.hora + ' hs con ' + d.profesional + ' en ' + d.consultorio + '.')}" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:6px;background:#25d366;color:#ffffff;text-decoration:none;padding:8px 12px;border-radius:8px;font-weight:700;font-size:12px;box-shadow:0 1px 4px rgba(37,211,102,0.3);text-transform:none;">
+                <a href="https://wa.me/${d.telefono.replace(/\D/g, '')}?text=${encodeURIComponent(textoMensajeWa)}" target="_blank" style="display:flex;align-items:center;justify-content:center;gap:6px;background:#25d366;color:#ffffff;text-decoration:none;padding:8px 12px;border-radius:8px;font-weight:700;font-size:12px;box-shadow:0 1px 4px rgba(37,211,102,0.3);text-transform:none;">
                     💬 Enviar recordatorio por WhatsApp
                 </a>
             </div>` : ''}
         </div>
+
+        ${requisitosHtml}
 
         <div class="tarjeta-info">
             <div class="titulo-card">Este turno</div>

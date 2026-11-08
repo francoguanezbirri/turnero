@@ -552,22 +552,28 @@ for _, cons in consultorios_df.iterrows():
                 else ""
             )
 
+            def val_limpio(v, default="—"):
+                if pd.isna(v) or v is None:
+                    return default
+                s = str(v).strip()
+                return s if s else default
+
             detalle = {
                 "nombre": nombre_completo,
-                "dni": t["dni"] if pd.notna(t["dni"]) and t["dni"] else "—",
-                "telefono": tel,
-                "obra_social": t["obra_social"],
-                "profesional": t["profesional"],
+                "dni": val_limpio(t.get("dni")),
+                "telefono": val_limpio(tel, default="sin tel."),
+                "obra_social": val_limpio(t.get("obra_social"), default="Particular"),
+                "profesional": val_limpio(t.get("profesional")),
                 "servicio": servicio,
                 "consultorio": cons_nombre,
                 "hora": h_str,
                 "fecha": fecha.strftime("%d/%m/%Y"),
-                "estado": t["estado"],
-                "creado_por": t["creado_por_nombre"] or "—",
-                "creado_en": t["creado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t["creado_en"]) else "—",
-                "modificado_por": t["modificado_por_nombre"] or "—",
-                "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t["modificado_en"]) else "—",
-                "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t["paciente_id"]) else [],
+                "estado": val_limpio(t.get("estado"), default="pendiente"),
+                "creado_por": val_limpio(t.get("creado_por_nombre")),
+                "creado_en": t["creado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("creado_en")) and hasattr(t["creado_en"], "strftime") else "—",
+                "modificado_por": val_limpio(t.get("modificado_por_nombre")),
+                "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("modificado_en")) and hasattr(t["modificado_en"], "strftime") else "—",
+                "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t.get("paciente_id")) else [],
                 "items_traer": items_traer,
             }
             detalle_b64 = base64.b64encode(json.dumps(detalle, ensure_ascii=False).encode("utf-8")).decode("ascii")

@@ -111,7 +111,8 @@ if st.session_state["usuario"] is None:
 
 usuario_actual = st.session_state["usuario"]
 
-st_autorefresh(interval=25000, key="auto_refresco")  # Sincronización en vivo cada 25s (sin saturar la red)
+if not st.session_state.get("mostrar_modal_turno"):
+    st_autorefresh(interval=25000, key="auto_refresco")  # Sincronización en vivo cada 25s (sin saturar la red)
 
 col_logo, col_titulo, col_sesion = st.columns([0.8, 6.2, 3])
 with col_logo:
@@ -985,6 +986,9 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
     profesionales_cons = horarios_cons[["profesional_id", "profesional"]].drop_duplicates()
     if profesionales_cons.empty:
         st.warning("Este consultorio no tiene ningún profesional atendiendo hoy.")
+        if st.button("Cerrar", key="btn_cerrar_sin_prof"):
+            cerrar_modal_turno()
+            st.rerun()
         return
 
     idx_prof = 0
@@ -1024,6 +1028,9 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
 
     if servicios_df.empty:
         st.warning(f"{profesional_sel_nombre} todavía no tiene servicios cargados. Agregalo en ⚙️ Servicios.")
+        if st.button("Cerrar", key="btn_cerrar_sin_serv"):
+            cerrar_modal_turno()
+            st.rerun()
         return
 
     col3, col4 = st.columns(2)
@@ -1063,7 +1070,7 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
             st.warning("No hay huecos disponibles para esta duración.")
 
     st.markdown("---")
-    dni_input = st.text_input("DNI del paciente")
+    dni_input = st.text_input("DNI del paciente", key="modal_input_dni").strip()
 
     paciente_id_existente = None
     apellido_nuevo = nombre_nuevo = telefono_nuevo = ""
@@ -1075,16 +1082,16 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
         conn_b.close()
         if not res.empty:
             paciente_id_existente = int(res.iloc[0]["id"])
-            st.success(f"Paciente: **{res.iloc[0]['nombre']} {res.iloc[0]['apellido']}** (Tel: {res.iloc[0]['telefono']})")
+            st.success(f"Paciente: **{res.iloc[0]['nombre']} {res.iloc[0]['apellido']}** (Tel: {res.iloc[0]['telefono'] or 'sin registrar'})")
         else:
-            st.info("Paciente nuevo. Completa sus datos:")
+            st.info("Paciente nuevo no registrado. Complete sus datos para crearlo:")
             c1, c2, c3 = st.columns(3)
             with c1:
-                apellido_nuevo = st.text_input("Apellido")
+                apellido_nuevo = st.text_input("Apellido *", key="modal_input_apellido").strip()
             with c2:
-                nombre_nuevo = st.text_input("Nombre")
+                nombre_nuevo = st.text_input("Nombre *", key="modal_input_nombre").strip()
             with c3:
-                telefono_nuevo = st.text_input("Teléfono")
+                telefono_nuevo = st.text_input("Teléfono", key="modal_input_telefono").strip()
 
             conn_os = get_connection()
             obras_sociales_df = pd.read_sql("SELECT id, nombre FROM obras_sociales ORDER BY nombre;", conn_os)
@@ -1093,20 +1100,20 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
             c4, c5 = st.columns([2, 1])
             with c4:
                 opciones_os = ["— Elegir —"] + obras_sociales_df["nombre"].tolist() + ["➕ Agregar nueva..."]
-                os_sel = st.selectbox("Obra social", options=opciones_os)
+                os_sel = st.selectbox("Obra social", options=opciones_os, key="modal_sel_os")
             with c5:
                 if os_sel == "➕ Agregar nueva...":
-                    os_nueva_nombre = st.text_input("Nueva obra social")
-                    if os_nueva_nombre.strip():
+                    os_nueva_nombre = st.text_input("Nueva obra social", key="modal_input_nueva_os").strip()
+                    if os_nueva_nombre:
                         conn_os2 = get_connection()
                         cur_os = conn_os2.cursor()
                         cur_os.execute(
                             "INSERT INTO obras_sociales (nombre) VALUES (%s) ON CONFLICT (nombre) DO NOTHING RETURNING id;",
-                            (os_nueva_nombre.strip(),),
+                            (os_nueva_nombre,),
                         )
                         fila_os = cur_os.fetchone()
                         if fila_os is None:
-                            cur_os.execute("SELECT id FROM obras_sociales WHERE nombre = %s;", (os_nueva_nombre.strip(),))
+                            cur_os.execute("SELECT id FROM obras_sociales WHERE nombre = %s;", (os_nueva_nombre,))
                             fila_os = cur_os.fetchone()
                         conn_os2.commit()
                         obra_social_id_nueva = int(fila_os[0])
@@ -1120,23 +1127,35 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
     c_req1, c_req2 = st.columns(2)
     with c_req1:
         traer_dinero = st.text_input("💵 Dinero / Coseguro a abonar", placeholder="Ej: $5000 o Efectivo", key="input_traer_dinero")
-        traer_credencial = st.checkbox("💳 Traer credencial / carnet", value=True, key="check_traer_cred")
+        traer_credencial = st.checkbox("💳 Traer credencial / carnet de obra social", value=True, key="check_traer_cred")
     with c_req2:
-        c_b1, c_b2 = st.columns(2)
-        with c_b1:
-            check_bonos = st.checkbox("📑 Bonos", key="check_bonos")
-            cant_bonos = int(st.number_input("Cant. bonos", min_value=1, max_value=20, value=1, key="num_bonos")) if check_bonos else 0
-        with c_b2:
-            check_ordenes = st.checkbox("📝 Órdenes", key="check_ordenes")
-            cant_ordenes = int(st.number_input("Cant. órdenes", min_value=1, max_value=20, value=1, key="num_ordenes")) if check_ordenes else 0
+        col_bon_chk, col_bon_num = st.columns([1, 1.2])
+        with col_bon_chk:
+            check_bonos = st.checkbox("📑 Traer Bonos", key="check_bonos")
+        with col_bon_num:
+            if check_bonos:
+                cant_bonos = int(st.number_input("¿Cuántos bonos?", min_value=1, max_value=20, value=1, step=1, key="num_bonos"))
+            else:
+                cant_bonos = 0
 
-    puede_guardar = dni_input and hora_sel is not None and (
-        paciente_id_existente is not None or (apellido_nuevo and nombre_nuevo)
+        col_ord_chk, col_ord_num = st.columns([1, 1.2])
+        with col_ord_chk:
+            check_ordenes = st.checkbox("📝 Traer Órdenes", key="check_ordenes")
+        with col_ord_num:
+            if check_ordenes:
+                cant_ordenes = int(st.number_input("¿Cuántas órdenes?", min_value=1, max_value=20, value=1, step=1, key="num_ordenes"))
+            else:
+                cant_ordenes = 0
+
+    puede_guardar = bool(
+        dni_input
+        and hora_sel is not None
+        and (paciente_id_existente is not None or (apellido_nuevo and nombre_nuevo))
     )
 
     c_btn1, c_btn2 = st.columns([3, 1])
     with c_btn1:
-        if st.button("💾 Guardar turno", type="primary", disabled=not puede_guardar, use_container_width=True):
+        if st.button("💾 Guardar turno", type="primary", disabled=not puede_guardar, use_container_width=True, key="btn_guardar_turno"):
             dt_inicio = a_datetime(hora_sel)
             horas_a_reservar = [(dt_inicio + timedelta(minutes=5 * i)).time() for i in range(slots_necesarios)]
 
@@ -1165,7 +1184,7 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
                          cant_ordenes),
                     )
                 conn_w.commit()
-                st.session_state["mostrar_modal_turno"] = False
+                cerrar_modal_turno()
                 st.rerun()
             except psycopg2.errors.UniqueViolation:
                 conn_w.rollback()
@@ -1177,18 +1196,61 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
                 cur.close()
                 conn_w.close()
     with c_btn2:
-        if st.button("Cancelar", use_container_width=True):
-            st.session_state["mostrar_modal_turno"] = False
+        if st.button("Cancelar", use_container_width=True, key="btn_cancelar_turno"):
+            cerrar_modal_turno()
             st.rerun()
+
+    if not puede_guardar:
+        motivos = []
+        if not dni_input:
+            motivos.append("ingresar el DNI del paciente")
+        elif paciente_id_existente is None:
+            if not apellido_nuevo:
+                motivos.append("completar el Apellido")
+            if not nombre_nuevo:
+                motivos.append("completar el Nombre")
+        if hora_sel is None:
+            motivos.append("seleccionar un Horario libre")
+        if motivos:
+            st.caption(f"💡 Para guardar debe: {', '.join(motivos)}.")
+
+def cerrar_modal_turno():
+    st.session_state["mostrar_modal_turno"] = False
+    st.session_state["modal_cons_id"] = None
+    st.session_state["modal_hora"] = None
+
+def abrir_modal_turno(cons_id=None, hora=None):
+    # Limpiar inputs previos para que el formulario se abra limpio
+    for k in [
+        "modal_input_dni", "modal_input_apellido", "modal_input_nombre",
+        "modal_input_telefono", "modal_sel_os", "modal_input_nueva_os",
+        "input_traer_dinero", "check_traer_cred", "check_bonos", "num_bonos",
+        "check_ordenes", "num_ordenes"
+    ]:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.session_state["modal_cons_id"] = cons_id
+    st.session_state["modal_hora"] = hora
+    st.session_state["mostrar_modal_turno"] = True
 
 # Definición del modal según soporte de Streamlit
 if hasattr(st, "dialog"):
-    @st.dialog("Cargar Turno", width="large")
-    def abrir_dialogo_turno(cons_id=None, hora=None):
-        modal_contenido_nuevo_turno(cons_id, hora)
-else:
-    def abrir_dialogo_turno(cons_id=None, hora=None):
-        st.session_state["mostrar_modal_turno"] = True
+    import inspect
+    sig = inspect.signature(st.dialog)
+    if "on_dismiss" in sig.parameters:
+        @st.dialog("Cargar Turno", width="large", on_dismiss=cerrar_modal_turno)
+        def abrir_dialogo_turno():
+            modal_contenido_nuevo_turno(
+                cons_id_inicial=st.session_state.get("modal_cons_id"),
+                hora_inicial_str=st.session_state.get("modal_hora"),
+            )
+    else:
+        @st.dialog("Cargar Turno", width="large")
+        def abrir_dialogo_turno():
+            modal_contenido_nuevo_turno(
+                cons_id_inicial=st.session_state.get("modal_cons_id"),
+                hora_inicial_str=st.session_state.get("modal_hora"),
+            )
 
 # ---------------------------------------------------------
 # PESTAÑAS PRINCIPALES
@@ -1205,11 +1267,9 @@ with tab_agenda:
             unsafe_allow_html=True
         )
     with c_btn:
-        if st.button("➕ Nuevo Turno", type="primary", use_container_width=True):
-            if hasattr(st, "dialog"):
-                abrir_dialogo_turno()
-            else:
-                st.session_state["mostrar_modal_turno"] = True
+        if st.button("➕  Nuevo Turno", type="primary", use_container_width=True, key="btn_nuevo_turno_top"):
+            abrir_modal_turno()
+            st.rerun()
 
     # Renderizar la grilla interactiva
     resultado_click = agenda_interactiva(
@@ -1235,12 +1295,8 @@ with tab_agenda:
         if tipo_accion == "nuevo_turno":
             h_click = resultado_click.get("hora")
             c_click = resultado_click.get("consultorio_id")
-            if hasattr(st, "dialog"):
-                abrir_dialogo_turno(cons_id=c_click, hora=h_click)
-            else:
-                st.session_state["modal_cons_id"] = c_click
-                st.session_state["modal_hora"] = h_click
-                st.session_state["mostrar_modal_turno"] = True
+            abrir_modal_turno(cons_id=c_click, hora=h_click)
+            st.rerun()
 
         # 2. Eliminación
         elif resultado_click.get("estado") == "__eliminar__":
@@ -1271,13 +1327,16 @@ with tab_agenda:
                 conn_u.close()
                 st.rerun()
 
-    # Fallback si no soporta st.dialog
-    if not hasattr(st, "dialog") and st.session_state.get("mostrar_modal_turno"):
-        with st.expander("➕ Cargar nuevo turno", expanded=True):
-            modal_contenido_nuevo_turno(
-                cons_id_inicial=st.session_state.get("modal_cons_id"),
-                hora_inicial_str=st.session_state.get("modal_hora")
-            )
+    # RENDERIZADO DEL MODAL SI ESTÁ ACTIVO
+    if st.session_state.get("mostrar_modal_turno"):
+        if hasattr(st, "dialog"):
+            abrir_dialogo_turno()
+        else:
+            with st.expander("➕ Cargar nuevo turno", expanded=True):
+                modal_contenido_nuevo_turno(
+                    cons_id_inicial=st.session_state.get("modal_cons_id"),
+                    hora_inicial_str=st.session_state.get("modal_hora")
+                )
 
     st.caption("⚡ Haz click en un casillero vacío para agregar un turno, o en la barra de color para cambiar su estado.")
 

@@ -479,12 +479,18 @@ for _, cons in consultorios_df.iterrows():
         # 3. TURNO OCUPADO
         if h in turnos_dict:
             t = turnos_dict[h]
-            # Calcular span de duración
+            # Calcular span de duración agrupando slots consecutivos del mismo turno
             span = 1
             k = idx + 1
             while k < len(filas_horas) and filas_horas[k] in turnos_dict:
                 t_sig = turnos_dict[filas_horas[k]]
-                if t_sig["paciente_id"] == t["paciente_id"] and t_sig["servicio"] == t["servicio"]:
+                mismo_paciente = (
+                    (pd.notna(t["paciente_id"]) and pd.notna(t_sig["paciente_id"]) and t_sig["paciente_id"] == t["paciente_id"])
+                    or (pd.isna(t["paciente_id"]) and pd.isna(t_sig["paciente_id"]))
+                )
+                mismo_servicio = (t_sig["servicio"] == t["servicio"])
+                mismo_profesional = (t_sig["profesional_id"] == t["profesional_id"])
+                if mismo_paciente and mismo_servicio and mismo_profesional:
                     span += 1
                     k += 1
                 else:
@@ -502,6 +508,19 @@ for _, cons in consultorios_df.iterrows():
                 tooltip += f" · Cargado por {t['creado_por_nombre']}"
 
             nombre_completo = f"{t['apellido_paciente']}, {t['paciente']}".strip(", ").upper()
+
+            # Altura en píxeles exacta según la duración real
+            alto_tarjeta_px = span * ALTO_FILA - 3
+            dt_inicio_turno = a_datetime(h)
+            dt_fin_turno = dt_inicio_turno + timedelta(minutes=5 * span)
+            rango_texto = f"{dt_inicio_turno.strftime('%H:%M')} a {dt_fin_turno.strftime('%H:%M')}"
+            duracion_min_total = span * 5
+
+            rango_badge_html = (
+                f'<div class="rango-turno">🕒 {rango_texto} ({duracion_min_total} min)</div>'
+                if span >= 3
+                else ""
+            )
 
             detalle = {
                 "nombre": nombre_completo,
@@ -525,12 +544,13 @@ for _, cons in consultorios_df.iterrows():
             filas_cons_html.append(f"""
                 <tr class="fila-slot{clase_en_punto}">
                     <td class="hora-cell">{h_str}</td>
-                    <td class="celda-turno" rowspan="{span}" title="{tooltip}">
-                        <div class="tarjeta-turno {clase_estado(t['estado'])}" data-ids="{','.join(ids_bloque)}" data-estado="{t['estado']}">
+                    <td class="celda-turno" rowspan="{span}" style="height: {span * ALTO_FILA}px;" title="{tooltip}">
+                        <div class="tarjeta-turno {clase_estado(t['estado'])}" style="height: {alto_tarjeta_px}px; min-height: {alto_tarjeta_px}px;" data-ids="{','.join(ids_bloque)}" data-estado="{t['estado']}">
                             <div class="barra-estado"></div>
                             <div class="contenido-turno" data-detalle="{detalle_b64}">
                                 <div class="nombre-paciente">{nombre_completo}</div>
                                 <div class="detalle-turno">{t['profesional']}: {servicio}</div>
+                                {rango_badge_html}
                             </div>
                         </div>
                     </td>
@@ -792,6 +812,16 @@ body {{
     color: #6b7280;
     line-height: 1.25;
     margin-top: 1px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}}
+.rango-turno {{
+    font-weight: 600;
+    font-size: 9.5px;
+    color: #4b5563;
+    line-height: 1.25;
+    margin-top: 2px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

@@ -135,7 +135,35 @@ with col_sesion:
         st.rerun()
 
 # ---------------------------------------------------------
-# Barra lateral: Mini calendario optimizado
+# Funciones de consulta cacheadas para velocidad máxima
+# ---------------------------------------------------------
+@st.cache_data(ttl=60)
+def cargar_consultorios_base():
+    c = get_connection()
+    df = pd.read_sql("SELECT id, nombre FROM consultorios ORDER BY nombre;", c)
+    c.close()
+    return df
+
+@st.cache_data(ttl=60)
+def cargar_horarios_dia(dia):
+    c = get_connection()
+    df = pd.read_sql(
+        """
+        SELECT h.consultorio_id, p.id AS profesional_id, p.nombre AS profesional,
+               h.hora_desde, h.hora_hasta
+        FROM horarios_atencion h
+        JOIN profesionales p ON p.id = h.profesional_id
+        WHERE h.dia_semana = %s;
+        """,
+        c, params=(dia,),
+    )
+    c.close()
+    return df
+
+consultorios_df = cargar_consultorios_base().copy()
+
+# ---------------------------------------------------------
+# Barra lateral: Mini calendario optimizado y Tachar agenda
 # ---------------------------------------------------------
 MESES_ES = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
             "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
@@ -208,33 +236,113 @@ with st.sidebar:
     st.divider()
     st.caption(f"🗓️ Fecha activa: **{fecha.strftime('%d/%m/%Y')}**")
 
+    # ---------------------------------------------------------
+    # SECCIÓN: TACHAR AGENDA (Bloqueos de consultorios)
+    # ---------------------------------------------------------
+    st.markdown("---")
+    with st.expander("🚫 Tachar agenda", expanded=False):
+        st.markdown("<div style='font-size:12px;color:#64748b;margin-bottom:8px;'>Bloquear un consultorio por ausencia, mantenimiento o feriado.</div>", unsafe_allow_html=True)
+        
+        nombres_cons_lista = consultorios_df["nombre"].tolist()
+        cons_bloq_sel = st.selectbox("Consultorio a tachar", options=nombres_cons_lista, key="sel_cons_bloq")
+        id_cons_bloq = int(consultorios_df.loc[consultorios_df["nombre"] == cons_bloq_sel, "id"].iloc[0])
+        
+        fecha_bloq = st.date_input("Fecha a tachar", value=fecha, key="fecha_bloq_input")
+        
+        # Horas de inicio y fin (cada 5 min de 07:00 a 20:30)
+        opciones_horas_bloq = [f"{h:02d}:{m:02d}" for h in range(7, 21) for m in (0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)]
+        c_h1, c_h2 = st.columns(2)
+        with c_h1:
+            idx_d = opciones_horas_bloq.index("08:00") if "08:00" in opciones_horas_bloq else 0
+            h_desde_str = st.selectbox("Hora inicio", options=opciones_horas_bloq, index=idx_d, key="h_desde_bloq")
+        with c_h2:
+            idx_h = opciones_horas_bloq.index("12:00") if "12:00" in opciones_horas_bloq else 10
+            h_hasta_str = st.selectbox("Hora fin", options=opciones_horas_bloq, index=idx_h, key="h_hasta_bloq")
+            
+        motivo_bloq = st.text_input("Motivo del bloqueo *", placeholder="Ej: Profesional ausente, Mantenimiento", key="txt_motivo_bloq").strip()
+        
+        t_desde = datetime.strptime(h_desde_str, "%H:%M").time()
+        t_hasta = datetime.strptime(h_hasta_str, "%H:%M").time()
+        
+        horas_validas = t_hasta > t_desde
+        if not horas_validas:
+            st.caption("⚠️ La hora de fin debe ser posterior a la de inicio.")
+        elif not motivo_bloq:
+            st.caption("⚠️ Debe ingresar un motivo o comentario.")
+            
+        # Advertencia de turnos preexistentes en ese consultorio y horario
+        turnos_conflicto = []
+        if horas_validas and id_cons_bloq:
+            conn_chk = get_connection()
+            tc_df = pd.read_sql(
+                """SELECT t.hora, pac.nombre, pac.apellido, p.nombre AS profesional
+                   FROM turnos t
+                   LEFT JOIN pacientes pac ON pac.id = t.paciente_id
+                   JOIN profesionales p ON p.id = t.profesional_id
+                   WHERE t.consultorio_id = %s AND t.fecha = %s AND t.hora >= %s AND t.hora < %s
+                   ORDER BY t.hora;""",
+                conn_chk,
+                params=(id_cons_bloq, fecha_bloq, t_desde, t_hasta)
+            )
+            conn_chk.close()
+            turnos_conflicto = tc_df.to_dict("records")
+            
+        confirmar_con_turnos = True
+        if turnos_conflicto:
+            st.warning(f"⚠️ Atención: Hay {len(turnos_conflicto)} turno(s) en esa franja:")
+            for tc in turnos_conflicto:
+                nom_p = f"{tc['apellido'] or ''}, {tc['nombre'] or ''}".strip(', ')
+                st.caption(f"• **{tc['hora'].strftime('%H:%M')}** — {nom_p} ({tc['profesional']})")
+            confirmar_con_turnos = st.checkbox("☑️ Deseo tachar igualmente (los turnos existentes se conservarán)", key="chk_confirma_bloq_turnos")
+            
+        puede_guardar_bloq = horas_validas and bool(motivo_bloq) and (not turnos_conflicto or confirmar_con_turnos)
+        
+        if st.button("💾 Guardar bloqueo", type="primary", disabled=not puede_guardar_bloq, use_container_width=True, key="btn_guardar_bloqueo"):
+            conn_ins = get_connection()
+            cur_b = conn_ins.cursor()
+            cur_b.execute(
+                """INSERT INTO bloqueos_agenda (consultorio_id, fecha, hora_desde, hora_hasta, motivo, creado_por)
+                   VALUES (%s, %s, %s, %s, %s, %s);""",
+                (id_cons_bloq, fecha_bloq, t_desde, t_hasta, motivo_bloq, usuario_actual["id"])
+            )
+            conn_ins.commit()
+            cur_b.close()
+            conn_ins.close()
+            st.success("Agenda tachada correctamente.")
+            st.rerun()
+
+        # Listado de bloqueos activos para la fecha seleccionada
+        conn_b_list = get_connection()
+        bloqueos_dia_sidebar = pd.read_sql(
+            """SELECT b.id, b.consultorio_id, b.hora_desde, b.hora_hasta, b.motivo, c.nombre AS consultorio
+               FROM bloqueos_agenda b
+               JOIN consultorios c ON c.id = b.consultorio_id
+               WHERE b.fecha = %s
+               ORDER BY b.hora_desde;""",
+            conn_b_list,
+            params=(fecha,)
+        )
+        conn_b_list.close()
+        
+        if not bloqueos_dia_sidebar.empty:
+            st.markdown("---")
+            st.markdown(f"**Bloqueos activos ({fecha.strftime('%d/%m')}):**")
+            for _, b_item in bloqueos_dia_sidebar.iterrows():
+                r_str = f"{b_item['hora_desde'].strftime('%H:%M')} a {b_item['hora_hasta'].strftime('%H:%M')}"
+                col_b_info, col_b_del = st.columns([3, 1])
+                with col_b_info:
+                    st.caption(f"🚫 **{b_item['consultorio']}** ({r_str})\n*{b_item['motivo']}*")
+                with col_b_del:
+                    if st.button("🗑️", key=f"del_bloq_sb_{b_item['id']}", help="Eliminar bloqueo"):
+                        conn_del = get_connection()
+                        cur_d = conn_del.cursor()
+                        cur_d.execute("DELETE FROM bloqueos_agenda WHERE id = %s;", (b_item["id"],))
+                        conn_del.commit()
+                        cur_d.close()
+                        conn_del.close()
+                        st.rerun()
+
 dia_semana = fecha.isoweekday()
-
-# Funciones de consulta cacheadas para velocidad máxima
-@st.cache_data(ttl=60)
-def cargar_consultorios_base():
-    c = get_connection()
-    df = pd.read_sql("SELECT id, nombre FROM consultorios ORDER BY nombre;", c)
-    c.close()
-    return df
-
-@st.cache_data(ttl=60)
-def cargar_horarios_dia(dia):
-    c = get_connection()
-    df = pd.read_sql(
-        """
-        SELECT h.consultorio_id, p.id AS profesional_id, p.nombre AS profesional,
-               h.hora_desde, h.hora_hasta
-        FROM horarios_atencion h
-        JOIN profesionales p ON p.id = h.profesional_id
-        WHERE h.dia_semana = %s;
-        """,
-        c, params=(dia,),
-    )
-    c.close()
-    return df
-
-consultorios_df = cargar_consultorios_base().copy()
 
 if usuario_actual["rol"] == "profesional" and usuario_actual["profesional_id"] is not None:
     c_prop = get_connection()
@@ -260,6 +368,7 @@ turnos_df = pd.read_sql(
            pac.telefono AS telefono,
            COALESCE(os.nombre, 'Sin obra social') AS obra_social,
            COALESCE(s.nombre, '') AS servicio,
+           COALESCE(s.indicaciones_preparacion, '') AS indicaciones_preparacion,
            p.nombre AS profesional,
            t.creado_en,
            uc.nombre_completo AS creado_por_nombre,
@@ -277,6 +386,19 @@ turnos_df = pd.read_sql(
     LEFT JOIN usuarios uc ON uc.id = t.creado_por
     LEFT JOIN usuarios um ON um.id = t.modificado_por
     WHERE t.fecha = %s;
+    """,
+    conn,
+    params=(fecha,),
+)
+
+bloqueos_df = pd.read_sql(
+    """
+    SELECT b.id, b.consultorio_id, b.fecha, b.hora_desde, b.hora_hasta, b.motivo,
+           u.nombre_completo AS creado_por_nombre, b.creado_en
+    FROM bloqueos_agenda b
+    LEFT JOIN usuarios u ON u.id = b.creado_por
+    WHERE b.fecha = %s
+    ORDER BY b.hora_desde;
     """,
     conn,
     params=(fecha,),
@@ -337,6 +459,14 @@ def clase_estado(estado):
 hora_inicio = horarios_df["hora_desde"].min()
 hora_fin = horarios_df["hora_hasta"].max()
 
+if not bloqueos_df.empty:
+    b_min = bloqueos_df["hora_desde"].min()
+    b_max = bloqueos_df["hora_hasta"].max()
+    if pd.notna(b_min) and b_min < hora_inicio:
+        hora_inicio = b_min
+    if pd.notna(b_max) and b_max > hora_fin:
+        hora_fin = b_max
+
 base = datetime.combine(fecha, datetime.min.time())
 def a_datetime(t):
     if isinstance(t, timedelta):
@@ -367,12 +497,13 @@ for _, cons in consultorios_df.iterrows():
     cons_nombre = cons["nombre"]
     h_cons = horarios_df[horarios_df["consultorio_id"] == cons_id].sort_values("hora_desde")
     t_cons = turnos_df[turnos_df["consultorio_id"] == cons_id]
+    b_cons = bloqueos_df[bloqueos_df["consultorio_id"] == cons_id] if not bloqueos_df.empty else pd.DataFrame()
 
     cant_turnos = len(t_cons["paciente_id"].dropna().unique()) if not t_cons.empty else 0
     badge_turnos = f"{cant_turnos} turnos" if cant_turnos > 0 else "0 turnos"
 
-    # Si el consultorio no tiene atención ni turnos hoy
-    if h_cons.empty and t_cons.empty:
+    # Si el consultorio no tiene atención, ni turnos, ni bloqueos hoy
+    if h_cons.empty and t_cons.empty and b_cons.empty:
         col_html = f"""
         <div class="columna-consultorio">
             <div class="header-consultorio">
@@ -393,7 +524,7 @@ for _, cons in consultorios_df.iterrows():
     # Turnos indexados por hora
     turnos_dict = {}
     for _, t in t_cons.iterrows():
-        turnos_dict[t["hora"]] = t
+        turnos_dict.setdefault(t["hora"], []).append(t)
 
     # Horarios del consultorio
     turnos_atencion = []
@@ -481,139 +612,223 @@ for _, cons in consultorios_df.iterrows():
             filas_cons_html.append(f'<tr class="fila-slot{clase_en_punto}"><td class="hora-cell">{h_str}</td></tr>')
             continue
 
-        # 3. TURNO OCUPADO
+        # 3. TURNO(S) OCUPADO(S) (Soporte para turnos únicos o superpuestos/simultáneos)
         if h in turnos_dict:
-            t = turnos_dict[h]
-            # Calcular span de duración agrupando slots consecutivos del mismo turno
-            span = 1
-            k = idx + 1
-            while k < len(filas_horas) and filas_horas[k] in turnos_dict:
-                t_sig = turnos_dict[filas_horas[k]]
-                mismo_paciente = (
-                    (pd.notna(t["paciente_id"]) and pd.notna(t_sig["paciente_id"]) and t_sig["paciente_id"] == t["paciente_id"])
-                    or (pd.isna(t["paciente_id"]) and pd.isna(t_sig["paciente_id"]))
+            turnos_en_h = turnos_dict[h]
+            spans_citas = []
+            tarjetas_html = []
+
+            # Agrupar turnos en este horario por cita
+            citas_unicas = {}
+            for t_item in turnos_en_h:
+                c_key = (
+                    t_item.get("paciente_id") if pd.notna(t_item.get("paciente_id")) else t_item.get("paciente"),
+                    t_item.get("profesional_id"),
+                    t_item.get("servicio_id"),
+                    t_item.get("creado_en")
                 )
-                mismo_servicio = (t_sig["servicio"] == t["servicio"])
-                mismo_profesional = (t_sig["profesional_id"] == t["profesional_id"])
-                if mismo_paciente and mismo_servicio and mismo_profesional:
-                    span += 1
-                    k += 1
-                else:
-                    break
-            skip_slots = span - 1
+                if c_key not in citas_unicas:
+                    citas_unicas[c_key] = t_item
 
-            ids_bloque = [str(turnos_dict[filas_horas[x]]["id"]) for x in range(idx, idx + span)]
+            for c_key, t in citas_unicas.items():
+                span = 1
+                k = idx + 1
+                while k < len(filas_horas) and filas_horas[k] in turnos_dict:
+                    en_k = [
+                        t2 for t2 in turnos_dict[filas_horas[k]]
+                        if (
+                            (t2.get("paciente_id") if pd.notna(t2.get("paciente_id")) else t2.get("paciente")) == c_key[0]
+                            and t2.get("profesional_id") == c_key[1]
+                            and t2.get("servicio_id") == c_key[2]
+                        )
+                    ]
+                    if en_k:
+                        span += 1
+                        k += 1
+                    else:
+                        break
+                spans_citas.append(span)
 
-            tel = t["telefono"] if t["telefono"] else "sin tel."
-            servicio = t["servicio"] if t["servicio"] else "Consulta"
+                # IDs de todos los slots de esta cita
+                ids_bloque = []
+                for x in range(idx, idx + span):
+                    if x < len(filas_horas) and filas_horas[x] in turnos_dict:
+                        for t_sub in turnos_dict[filas_horas[x]]:
+                            if (
+                                (t_sub.get("paciente_id") if pd.notna(t_sub.get("paciente_id")) else t_sub.get("paciente")) == c_key[0]
+                                and t_sub.get("profesional_id") == c_key[1]
+                                and t_sub.get("servicio_id") == c_key[2]
+                            ):
+                                ids_bloque.append(str(t_sub["id"]))
 
-            # Formatear requisitos que debe traer
-            items_traer = []
-            if pd.notna(t.get("traer_dinero")) and str(t.get("traer_dinero")).strip():
-                val_dinero = str(t.get("traer_dinero")).strip()
-                if not val_dinero.startswith("$"):
-                    val_dinero = f"${val_dinero}"
-                items_traer.append(f"Abonar {val_dinero}")
-            if t.get("traer_credencial") is True:
-                items_traer.append("Credencial / Carnet")
-            if pd.notna(t.get("traer_bonos")) and int(t.get("traer_bonos", 0)) > 0:
-                cb = int(t.get("traer_bonos"))
-                items_traer.append(f"{cb} bono{'s' if cb > 1 else ''}")
-            if pd.notna(t.get("traer_ordenes")) and int(t.get("traer_ordenes", 0)) > 0:
-                co = int(t.get("traer_ordenes"))
-                items_traer.append(f"{co} orden{'es' if co > 1 else ''}")
+                tel = t["telefono"] if t["telefono"] else "sin tel."
+                servicio = t["servicio"] if t["servicio"] else "Consulta"
 
-            tooltip = f"Tel: {tel} · {t['obra_social']}"
-            if items_traer:
-                tooltip += " · Traer: " + ", ".join(items_traer)
-            if t["modificado_por_nombre"] and pd.notna(t["modificado_en"]):
-                tooltip += f" · Modificado por {t['modificado_por_nombre']} el {t['modificado_en'].strftime('%d/%m %H:%M')}"
-            elif t["creado_por_nombre"]:
-                tooltip += f" · Cargado por {t['creado_por_nombre']}"
+                # Formatear requisitos que debe traer
+                items_traer = []
+                if pd.notna(t.get("traer_dinero")) and str(t.get("traer_dinero")).strip():
+                    val_dinero = str(t.get("traer_dinero")).strip()
+                    if not val_dinero.startswith("$"):
+                        val_dinero = f"${val_dinero}"
+                    items_traer.append(f"Abonar {val_dinero}")
+                if t.get("traer_credencial") is True:
+                    items_traer.append("Credencial / Carnet")
+                if pd.notna(t.get("traer_bonos")) and int(t.get("traer_bonos", 0)) > 0:
+                    cb = int(t.get("traer_bonos"))
+                    items_traer.append(f"{cb} bono{'s' if cb > 1 else ''}")
+                if pd.notna(t.get("traer_ordenes")) and int(t.get("traer_ordenes", 0)) > 0:
+                    co = int(t.get("traer_ordenes"))
+                    items_traer.append(f"{co} orden{'es' if co > 1 else ''}")
 
-            nombre_completo = f"{t['apellido_paciente']}, {t['paciente']}".strip(", ").upper()
+                tooltip = f"Tel: {tel} · {t['obra_social']}"
+                if items_traer:
+                    tooltip += " · Traer: " + ", ".join(items_traer)
+                if t["modificado_por_nombre"] and pd.notna(t["modificado_en"]):
+                    tooltip += f" · Modificado por {t['modificado_por_nombre']} el {t['modificado_en'].strftime('%d/%m %H:%M')}"
+                elif t["creado_por_nombre"]:
+                    tooltip += f" · Cargado por {t['creado_por_nombre']}"
 
-            # Altura en píxeles exacta según la duración real
-            alto_tarjeta_px = span * ALTO_FILA - 3
-            dt_inicio_turno = a_datetime(h)
-            dt_fin_turno = dt_inicio_turno + timedelta(minutes=5 * span)
-            rango_texto = f"{dt_inicio_turno.strftime('%H:%M')} a {dt_fin_turno.strftime('%H:%M')}"
-            duracion_min_total = span * 5
+                nombre_completo = f"{t['apellido_paciente']}, {t['paciente']}".strip(", ").upper()
 
-            rango_badge_html = (
-                f'<div class="rango-turno">🕒 {rango_texto} ({duracion_min_total} min)</div>'
-                if span >= 3
-                else ""
-            )
+                dt_inicio_turno = a_datetime(h)
+                dt_fin_turno = dt_inicio_turno + timedelta(minutes=5 * span)
+                rango_texto = f"{dt_inicio_turno.strftime('%H:%M')} a {dt_fin_turno.strftime('%H:%M')}"
+                duracion_min_total = span * 5
 
-            badge_traer_html = (
-                f'<div class="traer-turno">📌 Traer: {", ".join(items_traer)}</div>'
-                if (items_traer and span >= 4)
-                else ""
-            )
+                rango_badge_html = (
+                    f'<div class="rango-turno">🕒 {rango_texto} ({duracion_min_total} min)</div>'
+                    if span >= 3
+                    else ""
+                )
 
-            def val_limpio(v, default="—"):
-                if pd.isna(v) or v is None:
-                    return default
-                s = str(v).strip()
-                return s if s else default
+                badge_traer_html = (
+                    f'<div class="traer-turno">📌 Traer: {", ".join(items_traer)}</div>'
+                    if (items_traer and span >= 4)
+                    else ""
+                )
 
-            detalle = {
-                "nombre": nombre_completo,
-                "dni": val_limpio(t.get("dni")),
-                "telefono": val_limpio(tel, default="sin tel."),
-                "obra_social": val_limpio(t.get("obra_social"), default="Particular"),
-                "profesional": val_limpio(t.get("profesional")),
-                "servicio": servicio,
-                "consultorio": cons_nombre,
-                "hora": h_str,
-                "fecha": fecha.strftime("%d/%m/%Y"),
-                "estado": val_limpio(t.get("estado"), default="pendiente"),
-                "creado_por": val_limpio(t.get("creado_por_nombre")),
-                "creado_en": t["creado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("creado_en")) and hasattr(t["creado_en"], "strftime") else "—",
-                "modificado_por": val_limpio(t.get("modificado_por_nombre")),
-                "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("modificado_en")) and hasattr(t["modificado_en"], "strftime") else "—",
-                "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t.get("paciente_id")) else [],
-                "items_traer": items_traer,
-            }
-            detalle_b64 = base64.b64encode(json.dumps(detalle, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                def val_limpio(v, default="—"):
+                    if pd.isna(v) or v is None:
+                        return default
+                    s = str(v).strip()
+                    return s if s else default
+
+                detalle = {
+                    "nombre": nombre_completo,
+                    "dni": val_limpio(t.get("dni")),
+                    "telefono": val_limpio(tel, default="sin tel."),
+                    "obra_social": val_limpio(t.get("obra_social"), default="Particular"),
+                    "profesional": val_limpio(t.get("profesional")),
+                    "servicio": servicio,
+                    "consultorio": cons_nombre,
+                    "hora": h_str,
+                    "fecha": fecha.strftime("%d/%m/%Y"),
+                    "estado": val_limpio(t.get("estado"), default="pendiente"),
+                    "creado_por": val_limpio(t.get("creado_por_nombre")),
+                    "creado_en": t["creado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("creado_en")) and hasattr(t["creado_en"], "strftime") else "—",
+                    "modificado_por": val_limpio(t.get("modificado_por_nombre")),
+                    "modificado_en": t["modificado_en"].strftime("%d/%m/%Y %H:%M") if pd.notna(t.get("modificado_en")) and hasattr(t["modificado_en"], "strftime") else "—",
+                    "historial": historial_por_paciente.get(int(t["paciente_id"]), []) if pd.notna(t.get("paciente_id")) else [],
+                    "items_traer": items_traer,
+                    "indicaciones_preparacion": val_limpio(t.get("indicaciones_preparacion"), default=""),
+                }
+                detalle_b64 = base64.b64encode(json.dumps(detalle, ensure_ascii=False).encode("utf-8")).decode("ascii")
+
+                alto_tarjeta_px = (span * ALTO_FILA - 3) if len(citas_unicas) == 1 else "auto"
+                style_alto = f"height: {alto_tarjeta_px}px; min-height: {alto_tarjeta_px}px;" if len(citas_unicas) == 1 else "margin-bottom: 3px;"
+
+                tarjetas_html.append(f"""
+                    <div class="tarjeta-turno {clase_estado(t['estado'])}" style="{style_alto}" data-ids="{','.join(ids_bloque)}" data-estado="{t['estado']}">
+                        <div class="barra-estado"></div>
+                        <div class="contenido-turno" data-detalle="{detalle_b64}">
+                            <div class="nombre-paciente">{nombre_completo}</div>
+                            <div class="detalle-turno">{t['profesional']}: {servicio}</div>
+                            {rango_badge_html}
+                            {badge_traer_html}
+                            <div class="btn-recordatorio-chip" title="Ver recordatorio y WhatsApp">💬 Recordatorio</div>
+                        </div>
+                    </div>
+                """)
+
+            span_max = max(spans_citas) if spans_citas else 1
+            skip_slots = span_max - 1
 
             filas_cons_html.append(f"""
                 <tr class="fila-slot{clase_en_punto}">
                     <td class="hora-cell">{h_str}</td>
-                    <td class="celda-turno" rowspan="{span}" style="height: {span * ALTO_FILA}px;" title="{tooltip}">
-                        <div class="tarjeta-turno {clase_estado(t['estado'])}" style="height: {alto_tarjeta_px}px; min-height: {alto_tarjeta_px}px;" data-ids="{','.join(ids_bloque)}" data-estado="{t['estado']}">
-                            <div class="barra-estado"></div>
-                            <div class="contenido-turno" data-detalle="{detalle_b64}">
-                                <div class="nombre-paciente">{nombre_completo}</div>
-                                <div class="detalle-turno">{t['profesional']}: {servicio}</div>
-                                {rango_badge_html}
-                                {badge_traer_html}
+                    <td class="celda-turno" rowspan="{span_max}" style="height: {span_max * ALTO_FILA}px;" title="{tooltip}">
+                        {''.join(tarjetas_html)}
+                    </td>
+                </tr>
+            """)
+            continue
+
+        # 4. TACHAR AGENDA (BLOQUEO DE CONSULTORIO)
+        bloqueo_activo = None
+        if not b_cons.empty:
+            b_matches = b_cons[(b_cons["hora_desde"] <= h) & (h < b_cons["hora_hasta"])]
+            if not b_matches.empty:
+                bloqueo_activo = b_matches.iloc[0]
+
+        if bloqueo_activo is not None:
+            span_b = 1
+            k = idx + 1
+            while k < len(filas_horas):
+                h_k = filas_horas[k]
+                if h_k in turnos_dict:
+                    break
+                if not (bloqueo_activo["hora_desde"] <= h_k < bloqueo_activo["hora_hasta"]):
+                    break
+                span_b += 1
+                k += 1
+            skip_slots = span_b - 1
+
+            alto_bloq_px = span_b * ALTO_FILA - 3
+            hd_str = bloqueo_activo["hora_desde"].strftime("%H:%M") if hasattr(bloqueo_activo["hora_desde"], "strftime") else str(bloqueo_activo["hora_desde"])[:5]
+            hh_str = bloqueo_activo["hora_hasta"].strftime("%H:%M") if hasattr(bloqueo_activo["hora_hasta"], "strftime") else str(bloqueo_activo["hora_hasta"])[:5]
+            rango_bloqueo = f"{hd_str} a {hh_str}"
+
+            filas_cons_html.append(f"""
+                <tr class="fila-slot{clase_en_punto}">
+                    <td class="hora-cell">{h_str}</td>
+                    <td class="celda-turno" rowspan="{span_b}" style="height: {span_b * ALTO_FILA}px;">
+                        <div class="tarjeta-bloqueo" style="height: {alto_bloq_px}px; min-height: {alto_bloq_px}px;"
+                             data-bloqueo-id="{bloqueo_activo['id']}"
+                             data-motivo="{bloqueo_activo['motivo']}"
+                             data-rango="{rango_bloqueo}"
+                             data-cons-nombre="{cons_nombre}"
+                             title="Consultorio bloqueado ({rango_bloqueo}): {bloqueo_activo['motivo']}. Haz click para ver detalles o eliminar.">
+                            <div class="barra-bloqueo"></div>
+                            <div class="bloqueo-contenido">
+                                <div class="bloqueo-titulo">🚫 AGENDA BLOQUEADA</div>
+                                <div class="bloqueo-motivo">{bloqueo_activo['motivo']}</div>
+                                <div class="bloqueo-rango">🕒 {rango_bloqueo}</div>
                             </div>
                         </div>
                     </td>
                 </tr>
             """)
+            continue
+
+        # 5. CASILLERO LIBRE O FUERA DE HORARIO
+        if hay_atencion:
+            filas_cons_html.append(f"""
+                <tr class="fila-slot{clase_en_punto}">
+                    <td class="hora-cell">{h_str}</td>
+                    <td class="libre" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Click para nuevo turno ({h_str} - {cons_nombre})">
+                        <span class="slot-libre-plus">+</span>
+                    </td>
+                </tr>
+            """)
         else:
-            # 4. CASILLERO LIBRE O FUERA DE HORARIO
-            if hay_atencion:
-                filas_cons_html.append(f"""
-                    <tr class="fila-slot{clase_en_punto}">
-                        <td class="hora-cell">{h_str}</td>
-                        <td class="libre" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Click para nuevo turno ({h_str} - {cons_nombre})">
-                            <span class="slot-libre-plus">+</span>
-                        </td>
-                    </tr>
-                """)
-            else:
-                filas_cons_html.append(f"""
-                    <tr class="fila-slot slot-inactivo{clase_en_punto}">
-                        <td class="hora-cell inactivo">{h_str}</td>
-                        <td class="libre libre-inactiva" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Fuera de horario · Click para turno extraordinario ({h_str})">
-                            <span class="slot-libre-plus">+</span>
-                        </td>
-                    </tr>
-                """)
+            filas_cons_html.append(f"""
+                <tr class="fila-slot slot-inactivo{clase_en_punto}">
+                    <td class="hora-cell inactivo">{h_str}</td>
+                    <td class="libre libre-inactiva" data-hora="{h_str}" data-cons-id="{cons_id}" data-cons-nombre="{cons_nombre}" title="Fuera de horario · Click para turno extraordinario ({h_str})">
+                        <span class="slot-libre-plus">+</span>
+                    </td>
+                </tr>
+            """)
 
     tabla_body = "\n".join(filas_cons_html)
     col_html = f"""
@@ -945,6 +1160,82 @@ body {{
     margin-bottom: 8px;
     opacity: 0.6;
 }}
+.tarjeta-bloqueo {{
+    background: repeating-linear-gradient(-45deg, #f8fafc, #f8fafc 8px, #f1f5f9 8px, #f1f5f9 16px);
+    border: 1.5px dashed #cbd5e1;
+    border-radius: 8px;
+    padding: 6px 10px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    position: relative;
+    cursor: pointer;
+    overflow: hidden;
+    transition: all 0.15s ease;
+}}
+.tarjeta-bloqueo:hover {{
+    background: repeating-linear-gradient(-45deg, #fef2f2, #fef2f2 8px, #fee2e2 8px, #fee2e2 16px);
+    border-color: #f87171;
+}}
+.barra-bloqueo {{
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background: #ef4444;
+}}
+.bloqueo-contenido {{
+    padding-left: 6px;
+}}
+.bloqueo-titulo {{
+    font-size: 10px;
+    font-weight: 800;
+    color: #991b1b;
+    letter-spacing: 0.02em;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}}
+.bloqueo-motivo {{
+    font-size: 11px;
+    font-weight: 600;
+    color: #334155;
+    margin-top: 2px;
+    line-height: 1.25;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}}
+.bloqueo-rango {{
+    font-size: 9.5px;
+    font-weight: 500;
+    color: #64748b;
+    margin-top: 2px;
+}}
+.btn-recordatorio-chip {{
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 9.5px;
+    font-weight: 700;
+    color: #15803d;
+    background: #dcfce7;
+    border: 1px solid #86efac;
+    padding: 2px 7px;
+    border-radius: 12px;
+    cursor: pointer;
+    margin-top: 4px;
+    width: fit-content;
+    transition: all 0.15s ease;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}}
+.btn-recordatorio-chip:hover {{
+    background: #bbf7d0;
+    color: #166534;
+    transform: scale(1.02);
+}}
 @media (max-width: 768px) {{
     .tablero-consultorios {{
         scroll-snap-type: x mandatory;
@@ -1049,31 +1340,30 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
 
     slots_necesarios = max(1, -(-duracion_min // 5))
 
-    def hay_lugar(h_inicio):
-        dt = a_datetime(h_inicio)
-        for i in range(slots_necesarios):
-            h = (dt + timedelta(minutes=5 * i)).time()
-            activo = horarios_cons_sel[
-                (horarios_cons_sel["hora_desde"] <= h) & (h < horarios_cons_sel["hora_hasta"])
-            ]
-            if activo.empty or h in ocupadas:
-                return False
-        return True
+    # Franjas disponibles según el horario del profesional
+    if not horarios_cons_sel.empty:
+        h_prof_min = horarios_cons_sel["hora_desde"].min()
+        h_prof_max = horarios_cons_sel["hora_hasta"].max()
+        franjas_prof = [h for h in filas_horas if h_prof_min <= h < h_prof_max]
+    else:
+        franjas_prof = filas_horas
 
-    franjas_libres = [h for h in filas_horas if hay_lugar(h)]
-    opciones_horas = [h.strftime("%H:%M") for h in franjas_libres]
+    if not franjas_prof:
+        franjas_prof = filas_horas
+
+    opciones_horas = [h.strftime("%H:%M") for h in franjas_prof]
 
     idx_hora = 0
     if hora_inicial_str and hora_inicial_str in opciones_horas:
         idx_hora = opciones_horas.index(hora_inicial_str)
 
     with col4:
-        if franjas_libres:
+        if opciones_horas:
             hora_sel_str = st.selectbox("Horario", options=opciones_horas, index=idx_hora)
             hora_sel = datetime.strptime(hora_sel_str, "%H:%M").time()
         else:
             hora_sel = None
-            st.warning("No hay huecos disponibles para esta duración.")
+            st.warning("No hay horarios disponibles.")
 
     st.markdown("---")
     dni_input = st.text_input("DNI del paciente", key="modal_input_dni").strip()
@@ -1153,10 +1443,47 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
             else:
                 cant_ordenes = 0
 
+    # -------------------------------------------------------------
+    # VALIDACIONES DE SUPERPOSICIÓN / BLOQUEO
+    # -------------------------------------------------------------
+    confirma_superposicion = True
+    confirma_bloqueo = True
+
+    if hora_sel is not None:
+        dt_inicio = a_datetime(hora_sel)
+        horas_a_reservar = [(dt_inicio + timedelta(minutes=5 * i)).time() for i in range(slots_necesarios)]
+        hora_fin_calc = (dt_inicio + timedelta(minutes=5 * slots_necesarios)).time()
+
+        # 1. Advertencia de turnos existentes en ese consultorio y franja
+        turnos_conflicto_cons = turnos_cons_sel[turnos_cons_sel["hora"].isin(horas_a_reservar)]
+        if not turnos_conflicto_cons.empty:
+            citas_conf = turnos_conflicto_cons[["paciente", "apellido_paciente", "hora", "profesional"]].drop_duplicates()
+            detalles_c = [
+                f"{r['apellido_paciente']}, {r['paciente']} ({r['hora'].strftime('%H:%M') if hasattr(r['hora'], 'strftime') else str(r['hora'])[:5]} hs · Dr/a. {r['profesional']})"
+                for _, r in citas_conf.iterrows()
+            ]
+            st.warning(f"⚠️ **Atención:** En este horario ya existe turno agendado en este consultorio:\n• " + "\n• ".join(detalles_c))
+            confirma_superposicion = st.checkbox("☑️ Deseo agendar este turno superpuesto / simultáneo igualmente", key="chk_conf_superposicion")
+
+        # 2. Advertencia de bloqueos de agenda en este consultorio y franja
+        bloqueos_conflicto_cons = bloqueos_df[
+            (bloqueos_df["consultorio_id"] == cons_id_sel) &
+            (bloqueos_df["hora_desde"] < hora_fin_calc) &
+            (bloqueos_df["hora_hasta"] > hora_sel)
+        ]
+        if not bloqueos_conflicto_cons.empty:
+            b_c = bloqueos_conflicto_cons.iloc[0]
+            hd_c = b_c["hora_desde"].strftime("%H:%M") if hasattr(b_c["hora_desde"], "strftime") else str(b_c["hora_desde"])[:5]
+            hh_c = b_c["hora_hasta"].strftime("%H:%M") if hasattr(b_c["hora_hasta"], "strftime") else str(b_c["hora_hasta"])[:5]
+            st.warning(f"🚫 **Atención:** La agenda de este consultorio está bloqueada/tachada ({hd_c} a {hh_c} hs) por: *{b_c['motivo']}*.")
+            confirma_bloqueo = st.checkbox("☑️ Deseo agendar el turno dentro de la franja bloqueada igualmente", key="chk_conf_bloqueo")
+
     puede_guardar = bool(
         dni_input
         and hora_sel is not None
         and (paciente_id_existente is not None or (apellido_nuevo and nombre_nuevo))
+        and confirma_superposicion
+        and confirma_bloqueo
     )
 
     c_btn1, c_btn2 = st.columns([3, 1])
@@ -1216,7 +1543,11 @@ def modal_contenido_nuevo_turno(cons_id_inicial=None, hora_inicial_str=None):
             if not nombre_nuevo:
                 motivos.append("completar el Nombre")
         if hora_sel is None:
-            motivos.append("seleccionar un Horario libre")
+            motivos.append("seleccionar un Horario")
+        elif not confirma_superposicion:
+            motivos.append("tildar la casilla para confirmar el turno superpuesto")
+        elif not confirma_bloqueo:
+            motivos.append("tildar la casilla para confirmar el turno dentro del bloqueo")
         if motivos:
             st.caption(f"💡 Para guardar debe: {', '.join(motivos)}.")
 
@@ -1291,7 +1622,7 @@ with tab_agenda:
         key="agenda_click",
     )
 
-    # Manejo de clics (estados, borrado o click en celda libre)
+    # Manejo de clics (estados, borrado, click en celda libre o en bloqueo)
     if resultado_click and resultado_click.get("ts") != st.session_state.get("_ultimo_click_ts"):
         st.session_state["_ultimo_click_ts"] = resultado_click["ts"]
         
@@ -1304,7 +1635,17 @@ with tab_agenda:
             abrir_modal_turno(cons_id=c_click, hora=h_click)
             st.rerun()
 
-        # 2. Eliminación
+        # 2. Click en bloqueo de agenda
+        elif tipo_accion == "click_bloqueo":
+            st.session_state["bloqueo_seleccionado"] = {
+                "id": resultado_click.get("bloqueo_id"),
+                "motivo": resultado_click.get("motivo"),
+                "rango": resultado_click.get("rango"),
+                "consultorio": resultado_click.get("consultorio"),
+            }
+            st.rerun()
+
+        # 3. Eliminación
         elif resultado_click.get("estado") == "__eliminar__":
             ids_cambiar = resultado_click.get("ids", [])
             if ids_cambiar:
@@ -1316,7 +1657,7 @@ with tab_agenda:
                 conn_d.close()
                 st.rerun()
 
-        # 3. Cambio de estado
+        # 4. Cambio de estado
         elif resultado_click.get("estado"):
             ids_cambiar = resultado_click.get("ids", [])
             nuevo_estado_click = resultado_click.get("estado")
@@ -1344,13 +1685,43 @@ with tab_agenda:
                     hora_inicial_str=st.session_state.get("modal_hora")
                 )
 
-    st.caption("⚡ Haz click en un casillero vacío para agregar un turno, o en la barra de color para cambiar su estado.")
+    # MODAL DE DETALLE / ELIMINACIÓN DE BLOQUEO (AGENDA TACHADA)
+    if st.session_state.get("bloqueo_seleccionado"):
+        bloq = st.session_state["bloqueo_seleccionado"]
+        if hasattr(st, "dialog"):
+            @st.dialog("🚫 Agenda Bloqueada / Tachada")
+            def dialog_ver_bloqueo():
+                st.markdown(f"**Consultorio:** {bloq.get('consultorio', 'Consultorio')}")
+                st.markdown(f"**Horario:** 🕒 {bloq.get('rango', '')}")
+                st.markdown(f"**Motivo:** {bloq.get('motivo', '')}")
+                st.markdown("---")
+                c_del, c_close = st.columns([1.5, 1])
+                with c_del:
+                    if st.button("🗑️ Eliminar bloqueo", type="primary", use_container_width=True, key="btn_del_bloq_dialog"):
+                        conn_del = get_connection()
+                        cur_del = conn_del.cursor()
+                        cur_del.execute("DELETE FROM bloqueos_agenda WHERE id = %s;", (bloq["id"],))
+                        conn_del.commit()
+                        cur_del.close()
+                        conn_del.close()
+                        st.session_state["bloqueo_seleccionado"] = None
+                        st.success("Bloqueo eliminado correctamente.")
+                        st.rerun()
+                with c_close:
+                    if st.button("Cerrar", use_container_width=True, key="btn_close_bloq_dialog"):
+                        st.session_state["bloqueo_seleccionado"] = None
+                        st.rerun()
+            dialog_ver_bloqueo()
+
+    st.caption("⚡ Haz click en un casillero vacío para agregar un turno, en 💬 Recordatorio para abrir el mensaje de WhatsApp, o en la barra de color para cambiar su estado.")
 
 with tab_servicios:
     st.subheader("Administrar servicios")
     conn_s = get_connection()
     servicios_actuales = pd.read_sql(
-        """SELECT s.id, p.nombre AS profesional, s.nombre AS servicio, s.duracion_minutos
+        """SELECT s.id, p.nombre AS profesional, s.nombre AS servicio, s.duracion_minutos,
+                  COALESCE(s.indicaciones_preparacion, '') AS indicaciones_preparacion,
+                  s.profesional_id
            FROM servicios s
            JOIN profesionales p ON p.id = s.profesional_id
            ORDER BY p.nombre, s.nombre;""",
@@ -1363,40 +1734,98 @@ with tab_servicios:
         st.caption("Todavía no cargaste ningún servicio.")
     else:
         st.dataframe(
-            servicios_actuales[["profesional", "servicio", "duracion_minutos"]],
-            hide_index=True, use_container_width=True,
+            servicios_actuales[["profesional", "servicio", "duracion_minutos", "indicaciones_preparacion"]].rename(
+                columns={
+                    "profesional": "Profesional",
+                    "servicio": "Servicio",
+                    "duracion_minutos": "Duración (min)",
+                    "indicaciones_preparacion": "Preparación previa / Indicaciones",
+                }
+            ),
+            hide_index=True,
+            use_container_width=True,
         )
 
-    c0, c1, c2, c3 = st.columns([2, 3, 2, 2])
+    st.markdown("#### ➕ Agregar nuevo servicio")
+    c0, c1, c2 = st.columns([2, 3, 2])
     with c0:
         prof_nuevo_serv = st.selectbox("Profesional", options=todos_profesionales["nombre"], key="prof_nuevo_serv")
     with c1:
-        nuevo_serv_nombre = st.text_input("Nombre del servicio", key="nuevo_serv_nombre")
+        nuevo_serv_nombre = st.text_input("Nombre del servicio", placeholder="Ej: Ecografía abdominal", key="nuevo_serv_nombre")
     with c2:
         nuevo_serv_duracion = st.number_input(
             "Duración (min, múltiplo de 5)", min_value=5, step=5, value=30, key="nuevo_serv_dur"
         )
-    with c3:
-        st.write("")
-        st.write("")
-        if st.button("Agregar servicio"):
-            if nuevo_serv_nombre.strip():
-                prof_id_nuevo_serv = int(
-                    todos_profesionales.loc[todos_profesionales["nombre"] == prof_nuevo_serv, "id"].iloc[0]
+
+    nuevo_serv_indicaciones = st.text_area(
+        "Indicaciones especiales / Preparación previa (para recordatorio)",
+        placeholder="Ej: Ayuno de 8 horas. Concurrir con vejiga llena.",
+        help="Estas indicaciones se incluirán automáticamente en el recordatorio de WhatsApp del turno.",
+        key="nuevo_serv_ind"
+    )
+
+    if st.button("Guardar nuevo servicio", type="primary", key="btn_agregar_servicio"):
+        if nuevo_serv_nombre.strip():
+            prof_id_nuevo_serv = int(
+                todos_profesionales.loc[todos_profesionales["nombre"] == prof_nuevo_serv, "id"].iloc[0]
+            )
+            conn_s2 = get_connection()
+            cur_s = conn_s2.cursor()
+            cur_s.execute(
+                """INSERT INTO servicios (nombre, duracion_minutos, profesional_id, indicaciones_preparacion)
+                   VALUES (%s, %s, %s, %s);""",
+                (nuevo_serv_nombre.strip(), int(nuevo_serv_duracion), prof_id_nuevo_serv, nuevo_serv_indicaciones.strip() or None),
+            )
+            conn_s2.commit()
+            cur_s.close()
+            conn_s2.close()
+            st.success("Servicio agregado correctamente.")
+            st.rerun()
+        else:
+            st.warning("Escribí un nombre para el servicio.")
+
+    # Modificar servicio existente
+    if not servicios_actuales.empty:
+        st.markdown("---")
+        with st.expander("✏️ Modificar servicio existente", expanded=False):
+            opciones_serv_edit = [
+                f"{r['servicio']} ({r['profesional']})" for _, r in servicios_actuales.iterrows()
+            ]
+            serv_edit_sel = st.selectbox("Seleccionar servicio a editar", options=opciones_serv_edit, key="sel_serv_edit")
+            serv_edit_row = servicios_actuales.iloc[opciones_serv_edit.index(serv_edit_sel)]
+
+            c_e1, c_e2 = st.columns([3, 2])
+            with c_e1:
+                edit_nombre = st.text_input("Nombre del servicio", value=serv_edit_row["servicio"], key="edit_serv_nom")
+            with c_e2:
+                edit_dur = st.number_input(
+                    "Duración (min)", min_value=5, step=5, value=int(serv_edit_row["duracion_minutos"]), key="edit_serv_dur"
                 )
-                conn_s2 = get_connection()
-                cur_s = conn_s2.cursor()
-                cur_s.execute(
-                    "INSERT INTO servicios (nombre, duracion_minutos, profesional_id) VALUES (%s,%s,%s);",
-                    (nuevo_serv_nombre.strip(), int(nuevo_serv_duracion), prof_id_nuevo_serv),
-                )
-                conn_s2.commit()
-                cur_s.close()
-                conn_s2.close()
-                st.success("Servicio agregado.")
-                st.rerun()
-            else:
-                st.warning("Escribí un nombre para el servicio.")
+
+            edit_ind = st.text_area(
+                "Indicaciones especiales / Preparación previa (para recordatorio)",
+                value=serv_edit_row["indicaciones_preparacion"],
+                placeholder="Ej: Ayuno de 8 horas. Concurrir con vejiga llena.",
+                key="edit_serv_ind"
+            )
+
+            if st.button("💾 Guardar cambios en el servicio", type="primary", key="btn_save_edit_serv"):
+                if edit_nombre.strip():
+                    conn_edit = get_connection()
+                    cur_e = conn_edit.cursor()
+                    cur_e.execute(
+                        """UPDATE servicios
+                           SET nombre = %s, duracion_minutos = %s, indicaciones_preparacion = %s
+                           WHERE id = %s;""",
+                        (edit_nombre.strip(), int(edit_dur), edit_ind.strip() or None, int(serv_edit_row["id"])),
+                    )
+                    conn_edit.commit()
+                    cur_e.close()
+                    conn_edit.close()
+                    st.success("Servicio actualizado correctamente.")
+                    st.rerun()
+                else:
+                    st.warning("El servicio debe tener un nombre.")
 
 with tab_pacientes:
     st.subheader("Pacientes")

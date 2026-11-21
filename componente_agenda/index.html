@@ -60,6 +60,36 @@
   .item-historial .fecha-hist { color: #26272b; font-weight: 600; }
   .item-historial .detalle-hist { color: #9ca3af; font-size: 11.5px; }
   .sin-historial { color: #b0b3bb; font-size: 12.5px; font-style: italic; }
+  .tarjeta-bloqueo {
+    background: repeating-linear-gradient(-45deg, #f8fafc, #f8fafc 8px, #f1f5f9 8px, #f1f5f9 16px);
+    border: 1.5px dashed #cbd5e1; border-radius: 8px; padding: 6px 10px;
+    box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
+    position: relative; cursor: pointer; overflow: hidden; transition: all 0.15s ease;
+  }
+  .tarjeta-bloqueo:hover {
+    background: repeating-linear-gradient(-45deg, #fef2f2, #fef2f2 8px, #fee2e2 8px, #fee2e2 16px);
+    border-color: #f87171;
+  }
+  .barra-bloqueo {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: #ef4444;
+  }
+  .bloqueo-contenido { padding-left: 6px; }
+  .bloqueo-titulo {
+    font-size: 10px; font-weight: 800; color: #991b1b; letter-spacing: 0.02em;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .bloqueo-motivo {
+    font-size: 11px; font-weight: 600; color: #334155; margin-top: 2px;
+    line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .bloqueo-rango { font-size: 9.5px; font-weight: 500; color: #64748b; margin-top: 2px; }
+  .btn-recordatorio-chip {
+    display: inline-flex; align-items: center; gap: 3px; margin-top: 4px;
+    padding: 2px 7px; font-size: 9px; font-weight: 600; color: #15803d;
+    background: #dcfce7; border: 1px solid #bbf7d0; border-radius: 4px;
+    cursor: pointer; transition: background 0.15s; width: fit-content;
+  }
+  .btn-recordatorio-chip:hover { background: #bbf7d0; color: #166534; }
 </style>
 </head>
 <body>
@@ -192,6 +222,37 @@ function configurarClicksEnTurnos() {
         });
     });
 
+    // 2b. Click directo en el botón recordatorio del turno
+    document.querySelectorAll(".btn-recordatorio-chip").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const tarjeta = btn.closest(".tarjeta-turno");
+            if (tarjeta) {
+                const contenido = tarjeta.querySelector(".contenido-turno");
+                if (contenido) abrirPanelDetalle(contenido);
+            }
+        });
+    });
+
+    // 2c. Click en bloque de agenda tachada / bloqueada
+    document.querySelectorAll(".tarjeta-bloqueo").forEach((tb) => {
+        tb.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const bId = tb.getAttribute("data-bloqueo-id");
+            const bMotivo = tb.getAttribute("data-motivo");
+            const bRango = tb.getAttribute("data-rango");
+            const bCons = tb.getAttribute("data-cons-nombre");
+            enviarValor({
+                tipo: "click_bloqueo",
+                bloqueo_id: parseInt(bId),
+                motivo: bMotivo,
+                rango: bRango,
+                consultorio: bCons,
+                ts: Date.now()
+            });
+        });
+    });
+
     // 3. Click en casillero libre -> Cargar nuevo turno
     document.querySelectorAll(".libre").forEach((celda) => {
         celda.style.cursor = "pointer";
@@ -284,6 +345,20 @@ function abrirPanelDetalle(contenidoEl) {
         `).join("");
     }
 
+    let indicacionesHtml = '';
+    let textoIndicacionesWa = '';
+    if (d.indicaciones_preparacion && d.indicaciones_preparacion.trim()) {
+        indicacionesHtml = `
+        <div class="tarjeta-info" style="border-left: 4px solid #3b82f6; background: #eff6ff;">
+            <div class="titulo-card" style="color: #1d4ed8; margin-bottom: 5px;">🥣 Preparación previa / Indicaciones especiales</div>
+            <div style="font-size: 13px; line-height: 1.6; color: #1e293b; font-weight: 500;">
+                ${d.indicaciones_preparacion}
+            </div>
+        </div>
+        `;
+        textoIndicacionesWa = '\n\n*Preparación previa / Indicaciones especiales:*\n• ' + d.indicaciones_preparacion.trim();
+    }
+
     let requisitosHtml = '';
     let textoRequisitosWa = '';
     if (d.items_traer && d.items_traer.length > 0) {
@@ -298,13 +373,13 @@ function abrirPanelDetalle(contenidoEl) {
         textoRequisitosWa = '\n\n*A su turno debe traer:*\n' + d.items_traer.map((it) => '• ' + it).join('\n');
     }
 
-    const textoMensajeWa = 'Hola ' + d.nombre + ', te recordamos tu turno el ' + (d.fecha || '') + ' a las ' + d.hora + ' hs con ' + d.profesional + ' en ' + d.consultorio + '.' + textoRequisitosWa;
+    const textoMensajeWa = 'Hola ' + d.nombre + ', te recordamos tu turno el ' + (d.fecha || '') + ' a las ' + d.hora + ' hs con ' + d.profesional + '.' + textoIndicacionesWa + textoRequisitosWa;
 
     const panel = document.getElementById("panel-detalle");
     panel.innerHTML = `
         <button class="cerrar" id="btn-cerrar-detalle">✕</button>
         <h2>${d.nombre}</h2>
-        <div class="subt">DNI ${d.dni} · ${d.hora} hs · ${d.consultorio}</div>
+        <div class="subt">DNI ${d.dni} · ${d.hora} hs</div>
 
         <div class="tarjeta-info">
             <div class="titulo-card">Contacto</div>
@@ -318,6 +393,7 @@ function abrirPanelDetalle(contenidoEl) {
             </div>` : ''}
         </div>
 
+        ${indicacionesHtml}
         ${requisitosHtml}
 
         <div class="tarjeta-info">
